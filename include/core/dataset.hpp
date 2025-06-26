@@ -128,11 +128,17 @@ inline auto create_dataloader_from_dataset(
 
     const size_t dataset_size = dataset->size().value();
 
+    auto loader_options = torch::data::DataLoaderOptions()
+                              .batch_size(1)
+                              .workers(num_workers)
+                              .enforce_ordering(false);
+
+    if (torch::cuda::is_available()) {
+        loader_options = loader_options.pin_memory(true);
+    }
+
     return torch::data::make_data_loader(
         *dataset,
         torch::data::samplers::RandomSampler(dataset_size),
-        torch::data::DataLoaderOptions()
-            .batch_size(1)
-            .workers(num_workers)
-            .enforce_ordering(false));
+        loader_options);
 }

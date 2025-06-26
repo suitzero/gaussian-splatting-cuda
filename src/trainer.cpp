@@ -319,6 +319,10 @@ namespace gs {
                 Camera* cam = camera_with_image.camera;
                 torch::Tensor gt_image = std::move(camera_with_image.image);
 
+                if (params_.optimization.accelerate_data_loading) {
+                    gt_image = gt_image.to(torch::kCUDA, /*non_blocking=*/true);
+                }
+
                 should_continue = train_step(iter, cam, gt_image, render_mode);
 
                 if (!should_continue) {
