@@ -148,9 +148,11 @@ inline auto create_dataloader_from_dataset(
                               .workers(num_workers)
                               .enforce_ordering(false);
 
-    if (torch::cuda::is_available()) {
-        loader_options = loader_options.pin_memory(true);
-    }
+    // Removed pin_memory(true) call due to API incompatibility with torch 2.7.0 as reported.
+    // DataLoader will use its default behavior regarding pinned memory.
+    // Efficient non-blocking transfers still rely on the source tensor being in pinned memory,
+    // which is not explicitly done for preloaded_cpu_image_data_ yet, but DataLoader
+    // workers might use pinned memory internally if possible.
 
     return torch::data::make_data_loader(
         *dataset,

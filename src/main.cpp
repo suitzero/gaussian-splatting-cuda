@@ -39,8 +39,8 @@ int main(int argc, char* argv[]) {
                 device_id = 0;
             }
             device = torch::Device(torch::kCUDA, device_id);
-            std::cout << "Main.cpp: Target CUDA device for model initialization: " << device_id
-                      << " (" << torch::cuda::get_device_name(device_id) << ")" << std::endl;
+             std::cout << "Main.cpp: Target CUDA device ID for model initialization: " << device_id << std::endl;
+             // TODO: Log device name using correct API for this LibTorch version.
         } else {
             // This case should ideally be caught by Trainer later, but good to be aware.
             // If no CUDA, SplatData init might fail if it expects CUDA tensors.

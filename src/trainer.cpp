@@ -81,11 +81,13 @@ namespace gs {
                      std::unique_ptr<IStrategy> strategy,
                      const param::TrainingParameters& params)
         : strategy_(std::move(strategy)),
-          params_(params) {
+          params_(params),
+          device_(torch::kCPU) { // Initialize device_ with CPU by default
 
         if (!torch::cuda::is_available()) {
             throw std::runtime_error("CUDA is not available – aborting.");
         }
+        // Existing logic to set device_ to CUDA if available will follow
 
         // Handle dataset split based on evaluation flag
         if (params.optimization.enable_eval) {
@@ -120,7 +122,7 @@ namespace gs {
                 device_id = 0;
             }
             device_ = torch::Device(torch::kCUDA, device_id);
-            std::cout << "Using CUDA device: " << device_id << " (" << torch::cuda::get_device_name(device_id) << ")" << std::endl;
+             std::cout << "Using CUDA device ID: " << device_id << std::endl; // TODO: Log device name using correct API for this LibTorch version.
         } else {
             // This was already checked at the beginning of the constructor, but for safety:
             throw std::runtime_error("CUDA is not available – aborting. (Secondary check)");
