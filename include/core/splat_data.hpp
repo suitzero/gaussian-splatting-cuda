@@ -31,10 +31,12 @@ public:
               torch::Tensor scaling,
               torch::Tensor rotation,
               torch::Tensor opacity,
-              float scene_scale);
+              float scene_scale); // Consider adding device here if _max_radii2D needs it explicitly.
 
     // Static factory method to create from PointCloud
-    static SplatData init_model_from_pointcloud(const gs::param::TrainingParameters& params, torch::Tensor scene_center);
+    static SplatData init_model_from_pointcloud(const gs::param::TrainingParameters& params,
+                                                torch::Tensor scene_center,
+                                                const torch::Device& device);
 
     // Computed getters (implemented in cpp)
     torch::Tensor get_means() const;

@@ -23,12 +23,36 @@ int main(int argc, char* argv[]) {
         //----------------------------------------------------------------------
         // 3. Create dataset from COLMAP
         //----------------------------------------------------------------------
-        auto [dataset, scene_center] = create_dataset_from_colmap(params.dataset);
+        auto [dataset, scene_center] = create_dataset_from_colmap(params.dataset); // scene_center is a CPU tensor here
+
+        //----------------------------------------------------------------------
+        // Determine target CUDA device for model initialization and training
+        //----------------------------------------------------------------------
+        torch::Device device = torch::kCPU; // Default to CPU if CUDA not available or not used
+        if (torch::cuda::is_available()) {
+            int device_id = params.optimization.cuda_device_id;
+            int num_cuda_devices = torch::cuda::device_count();
+            if (device_id < 0 || device_id >= num_cuda_devices) {
+                std::cerr << "Warning (main.cpp): Invalid cuda_device_id " << device_id
+                          << ". Available devices: 0-" << (num_cuda_devices - 1)
+                          << ". Defaulting to device 0 for model initialization." << std::endl;
+                device_id = 0;
+            }
+            device = torch::Device(torch::kCUDA, device_id);
+            std::cout << "Main.cpp: Target CUDA device for model initialization: " << device_id
+                      << " (" << torch::cuda::get_device_name(device_id) << ")" << std::endl;
+        } else {
+            // This case should ideally be caught by Trainer later, but good to be aware.
+            // If no CUDA, SplatData init might fail if it expects CUDA tensors.
+            // The current SplatData::init_model_from_pointcloud is now device-aware.
+            std::cout << "Main.cpp: CUDA not available. Model initialization will use CPU." << std::endl;
+        }
+         // scene_center is moved to the target 'device' inside init_model_from_pointcloud
 
         //----------------------------------------------------------------------
         // 4. Model initialisation
         //----------------------------------------------------------------------
-        auto splat_data = SplatData::init_model_from_pointcloud(params, scene_center);
+        auto splat_data = SplatData::init_model_from_pointcloud(params, scene_center, device);
 
         //----------------------------------------------------------------------
         // 5. Create strategy

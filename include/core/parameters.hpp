@@ -47,6 +47,7 @@ namespace gs {
             bool selective_adam = false; // Use Selective Adam optimizer
             bool accelerate_data_loading = false;
             int batch_size = 1;
+            int cuda_device_id = 0;
         };
 
         struct DatasetConfig {

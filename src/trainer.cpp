@@ -20,10 +20,12 @@ namespace gs {
 
         bilateral_grid_ = std::make_unique<gs::BilateralGrid>(
             train_dataset_size_,
+            device_, // Pass the configured device
             params_.optimization.bilateral_grid_X,
             params_.optimization.bilateral_grid_Y,
             params_.optimization.bilateral_grid_W);
 
+        // The optimizer will work with parameters on the correct device
         bilateral_grid_optimizer_ = std::make_unique<torch::optim::Adam>(
             std::vector<torch::Tensor>{bilateral_grid_->parameters()},
             torch::optim::AdamOptions(params_.optimization.bilateral_grid_lr)
@@ -107,13 +109,30 @@ namespace gs {
 
         train_dataset_size_ = train_dataset_->size().value();
 
+        // Initialize and validate the CUDA device
+        int device_id = params.optimization.cuda_device_id;
+        if (torch::cuda::is_available()) {
+            int num_cuda_devices = torch::cuda::device_count();
+            if (device_id < 0 || device_id >= num_cuda_devices) {
+                std::cerr << "Warning: Invalid cuda_device_id " << device_id
+                          << ". Available devices: 0-" << (num_cuda_devices - 1)
+                          << ". Defaulting to device 0." << std::endl;
+                device_id = 0;
+            }
+            device_ = torch::Device(torch::kCUDA, device_id);
+            std::cout << "Using CUDA device: " << device_id << " (" << torch::cuda::get_device_name(device_id) << ")" << std::endl;
+        } else {
+            // This was already checked at the beginning of the constructor, but for safety:
+            throw std::runtime_error("CUDA is not available – aborting. (Secondary check)");
+        }
+
         strategy_->initialize(params.optimization);
 
         // Initialize bilateral grid if enabled
-        initialize_bilateral_grid();
+        initialize_bilateral_grid(); // This might need to be device-aware if it creates CUDA tensors
 
         background_ = torch::tensor({0.f, 0.f, 0.f}, torch::TensorOptions().dtype(torch::kFloat32));
-        background_ = background_.to(torch::kCUDA);
+        background_ = background_.to(device_); // Use configured device
 
         progress_ = std::make_unique<TrainingProgress>(
             params.optimization.iterations,
@@ -217,9 +236,9 @@ namespace gs {
             torch::Tensor current_gt_image = std::move(item.image);
 
             if (params_.optimization.accelerate_data_loading) {
-                current_gt_image = current_gt_image.to(torch::kCUDA, /*non_blocking=*/true);
+                current_gt_image = current_gt_image.to(device_, /*non_blocking=*/true);
             } else {
-                current_gt_image = current_gt_image.to(torch::kCUDA); // Ensure on CUDA
+                current_gt_image = current_gt_image.to(device_); // Ensure on configured CUDA device
             }
 
             auto render_fn_item = [this, &cam, render_mode]() {

@@ -220,7 +220,8 @@ SplatData::SplatData(int sh_degree,
       _scaling{std::move(scaling)},
       _rotation{std::move(rotation)},
       _opacity{std::move(opacity)},
-      _max_radii2D{torch::zeros({_means.size(0)}).to(torch::kCUDA)} {}
+      // _means is already on the correct device, so _max_radii2D will inherit its device.
+      _max_radii2D{torch::zeros({_means.size(0)}, _means.options())} {}
 
 // Computed getters
 torch::Tensor SplatData::get_means() const {
@@ -326,11 +327,14 @@ PointCloud SplatData::to_point_cloud() const {
     return pc;
 }
 
-SplatData SplatData::init_model_from_pointcloud(const gs::param::TrainingParameters& params, torch::Tensor scene_center) {
+SplatData SplatData::init_model_from_pointcloud(const gs::param::TrainingParameters& params,
+                                                 torch::Tensor scene_center,
+                                                 const torch::Device& device) {
     // Helper lambdas
     auto pcd = read_colmap_point_cloud(params.dataset.data_path);
 
-    const torch::Tensor dists = torch::norm(pcd.means - scene_center, 2, 1); // [N_points]
+    // scene_center might be on CPU or a different device, ensure it's on the target device for norm
+    const torch::Tensor dists = torch::norm(pcd.means.to(device) - scene_center.to(device), 2, 1); // [N_points]
     const auto scene_scale = dists.median().item<float>();
 
     auto rgb_to_sh = [](const torch::Tensor& rgb) {
@@ -338,39 +342,39 @@ SplatData SplatData::init_model_from_pointcloud(const gs::param::TrainingParamet
         return (rgb - 0.5f) / kInvSH;
     };
 
-    const auto f32 = torch::TensorOptions().dtype(torch::kFloat32);
-    const auto f32_cuda = f32.device(torch::kCUDA);
+    const auto tensor_opts = torch::TensorOptions().dtype(torch::kFloat32).device(device);
 
     // Ensure colors are normalized floats
-    pcd.normalize_colors();
+    pcd.normalize_colors(); // This operates on pcd.colors, which is likely CPU
 
-    // 1. means - already a tensor, just move to CUDA and set requires_grad
-    auto means = pcd.means.to(torch::kCUDA).set_requires_grad(true);
+    // 1. means - already a tensor, just move to target device and set requires_grad
+    auto means = pcd.means.to(device).set_requires_grad(true);
 
     // 2. scaling (log(σ)) - compute nearest neighbor distances
-    auto nn_dist = torch::clamp_min(compute_mean_neighbor_distances(means), 1e-7);
+    // compute_mean_neighbor_distances expects means on target device
+    auto nn_dist = torch::clamp_min(compute_mean_neighbor_distances(means), 1e-7); // nn_dist will be on device
     auto scaling = torch::log(torch::sqrt(nn_dist) * params.optimization.init_scaling)
                        .unsqueeze(-1)
                        .repeat({1, 3})
-                       .to(f32_cuda)
+                       // .to(tensor_opts) // Not needed if nn_dist is already on device
                        .set_requires_grad(true);
 
     // 3. rotation (quaternion, identity) - split into multiple lines to avoid compilation error
-    auto rotation = torch::zeros({means.size(0), 4}, f32_cuda);
+    auto rotation = torch::zeros({means.size(0), 4}, tensor_opts);
     rotation.index_put_({torch::indexing::Slice(), 0}, 1);
     rotation = rotation.set_requires_grad(true);
 
     // 4. opacity (inverse sigmoid of 0.5)
-    auto opacity = torch::logit(params.optimization.init_opacity * torch::ones({means.size(0), 1}, f32_cuda))
+    auto opacity = torch::logit(params.optimization.init_opacity * torch::ones({means.size(0), 1}, tensor_opts))
                        .set_requires_grad(true);
 
     // 5. shs (SH coefficients)
     // Colors are already normalized to float by pcd.normalize_colors()
-    auto colors_float = pcd.colors.to(torch::kCUDA);
+    auto colors_float = pcd.colors.to(device); // pcd.colors is likely CPU, move to device
     auto fused_color = rgb_to_sh(colors_float);
 
     const int64_t feature_shape = static_cast<int64_t>(std::pow(params.optimization.sh_degree + 1, 2));
-    auto shs = torch::zeros({fused_color.size(0), 3, feature_shape}, f32_cuda);
+    auto shs = torch::zeros({fused_color.size(0), 3, feature_shape}, tensor_opts);
 
     // Set DC coefficients
     shs.index_put_({torch::indexing::Slice(),

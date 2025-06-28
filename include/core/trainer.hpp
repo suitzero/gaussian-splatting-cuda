@@ -101,6 +101,9 @@ namespace gs {
         // Current training state
         std::atomic<int> current_iteration_{0};
         std::atomic<float> current_loss_{0.0f};
+
+        // Target device for CUDA operations
+        torch::Device device_;
     };
 
 } // namespace gs

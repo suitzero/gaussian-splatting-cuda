@@ -71,19 +71,27 @@ namespace gs {
     };
 
     // BilateralGrid implementation
-    BilateralGrid::BilateralGrid(int num_images, int grid_W, int grid_H, int grid_L)
+    BilateralGrid::BilateralGrid(int num_images,
+                                 const torch::Device& device,
+                                 int grid_W,
+                                 int grid_H,
+                                 int grid_L)
         : num_images_(num_images),
           grid_width_(grid_W),
           grid_height_(grid_H),
           grid_guidance_(grid_L) {
 
         // Initialize with identity transformation
-        auto eye = torch::eye(4, torch::kFloat32).slice(0, 0, 3);
+        // Ensure initial tensors are created on CPU then moved, or directly on the target device if simple.
+        // For eye, it's simple enough.
+        auto eye = torch::eye(4, torch::TensorOptions().dtype(torch::kFloat32).device(device)).slice(0, 0, 3);
+        // For subsequent operations, ensure they are on the same device or handle transfers.
+        // .repeat, .reshape, .permute should preserve device.
         auto grid = eye.repeat({grid_L * grid_H * grid_W, 1});
         grid = grid.reshape({1, grid_L, grid_H, grid_W, 12});
-        grid = grid.permute({0, 4, 1, 2, 3});
+        grid = grid.permute({0, 4, 1, 2, 3}); // grid is now on 'device'
 
-        grids_ = grid.repeat({num_images, 1, 1, 1, 1}).to(torch::kCUDA);
+        grids_ = grid.repeat({num_images, 1, 1, 1, 1}); // No .to(device) needed here if grid is already on device
         grids_.set_requires_grad(true);
     }
 

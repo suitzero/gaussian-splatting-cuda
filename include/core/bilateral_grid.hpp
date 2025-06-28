@@ -7,7 +7,11 @@ namespace gs {
 
     class BilateralGrid {
     public:
-        BilateralGrid(int num_images, int grid_W = 16, int grid_H = 16, int grid_L = 8);
+        BilateralGrid(int num_images,
+                      const torch::Device& device,
+                      int grid_W = 16,
+                      int grid_H = 16,
+                      int grid_L = 8);
 
         // Apply bilateral grid to rendered image
         torch::Tensor apply(const torch::Tensor& rgb, int image_idx);

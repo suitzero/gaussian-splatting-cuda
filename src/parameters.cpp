@@ -124,7 +124,8 @@ namespace gs {
                     {"sh_degree_interval", defaults.sh_degree_interval, "Interval for increasing SH degree"},
                     {"selective_adam", defaults.selective_adam, "Selective Adam optimizer flag"},
                     {"accelerate_data_loading", defaults.accelerate_data_loading, "Accelerate data loading using pinned memory and early GPU transfer"},
-                    {"batch_size", defaults.batch_size, "Number of images to process in a batch"}};
+                    {"batch_size", defaults.batch_size, "Number of images to process in a batch"},
+                    {"cuda_device_id", defaults.cuda_device_id, "CUDA device ID to use for training"}};
 
                 // Check all expected parameters
                 for (const auto& param : expected_params) {
@@ -339,6 +340,13 @@ namespace gs {
                     params.batch_size = 1;
                 }
             }
+            if (json.contains("cuda_device_id")) {
+                params.cuda_device_id = json["cuda_device_id"];
+                if (params.cuda_device_id < 0) {
+                    std::cerr << "Warning: cuda_device_id must be non-negative. Setting to 0." << std::endl;
+                    params.cuda_device_id = 0;
+                }
+            }
             return params;
         }
 
@@ -413,6 +421,7 @@ namespace gs {
             opt_json["selective_adam"] = params.optimization.selective_adam;
             opt_json["accelerate_data_loading"] = params.optimization.accelerate_data_loading;
             opt_json["batch_size"] = params.optimization.batch_size;
+            opt_json["cuda_device_id"] = params.optimization.cuda_device_id;
 
             json["optimization"] = opt_json;
 
