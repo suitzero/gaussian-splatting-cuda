@@ -124,12 +124,13 @@ inline std::tuple<std::shared_ptr<CameraDataset>, torch::Tensor> create_dataset_
 
 inline auto create_dataloader_from_dataset(
     std::shared_ptr<CameraDataset> dataset,
+    int batch_size,
     int num_workers = 4) {
 
     const size_t dataset_size = dataset->size().value();
 
     auto loader_options = torch::data::DataLoaderOptions()
-                              .batch_size(1)
+                              .batch_size(batch_size)
                               .workers(num_workers)
                               .enforce_ordering(false);
 

@@ -46,7 +46,14 @@ namespace gs {
 
         // Base loss: L1 + SSIM
         auto l1_loss = torch::l1_loss(rendered, gt);
-        auto ssim_loss = 1.f - fused_ssim(rendered, gt, "valid", /*train=*/true);
+
+        // fused_ssim expects NCHW format [Batch, Channels, Height, Width]
+        // Assuming 'rendered' and 'gt' are currently NHWC [Batch, Height, Width, Channels]
+        // (Common from image loading/rasterization)
+        torch::Tensor rendered_nchw = rendered.permute({0, 3, 1, 2}).contiguous();
+        torch::Tensor gt_nchw = gt.permute({0, 3, 1, 2}).contiguous();
+
+        auto ssim_loss = 1.f - fused_ssim(rendered_nchw, gt_nchw, "valid", /*train=*/true);
         torch::Tensor loss = (1.f - opt_params.lambda_dssim) * l1_loss +
                              opt_params.lambda_dssim * ssim_loss;
 
@@ -169,8 +176,15 @@ namespace gs {
         }
     }
 
-    bool Trainer::train_step(int iter, Camera* cam, torch::Tensor gt_image, RenderMode render_mode) {
+    // bool Trainer::train_step(int iter, Camera* cam, torch::Tensor gt_image, RenderMode render_mode) {
+    bool Trainer::train_step(int iter, std::vector<CameraWithImage>& batch_data, RenderMode render_mode) {
         current_iteration_ = iter;
+
+        if (batch_data.empty()) {
+            // Or log a warning, or return true to not stop training if this is recoverable
+            std::cerr << "Warning: train_step received empty batch_data at iteration " << iter << std::endl;
+            return true;
+        }
 
         // Check control requests at the beginning
         handle_control_requests(iter);
@@ -191,50 +205,88 @@ namespace gs {
             return false;
         }
 
-        // Use the render mode from parameters
-        auto render_fn = [this, &cam, render_mode]() {
-            return gs::rasterize(
-                *cam,
-                strategy_->get_model(),
-                background_,
-                1.0f,
-                false,
-                false,
-                render_mode);
-        };
+        std::vector<torch::Tensor> rendered_images_list;
+        rendered_images_list.reserve(batch_data.size());
+        std::vector<torch::Tensor> gt_images_list;
+        gt_images_list.reserve(batch_data.size());
 
-        RenderOutput r_output;
+        RenderOutput last_r_output; // For strategy and potentially other single-instance needs
 
-        if (viewer_) {
-            std::lock_guard<std::mutex> lock(viewer_->splat_mtx_);
-            r_output = render_fn();
-        } else {
-            r_output = render_fn();
+        for (CameraWithImage& item : batch_data) {
+            Camera* cam = item.camera;
+            torch::Tensor current_gt_image = std::move(item.image);
+
+            if (params_.optimization.accelerate_data_loading) {
+                current_gt_image = current_gt_image.to(torch::kCUDA, /*non_blocking=*/true);
+            } else {
+                current_gt_image = current_gt_image.to(torch::kCUDA); // Ensure on CUDA
+            }
+
+            auto render_fn_item = [this, &cam, render_mode]() {
+                return gs::rasterize(
+                    *cam,
+                    strategy_->get_model(),
+                    background_,
+                    1.0f,
+                    false,
+                    false,
+                    render_mode);
+            };
+
+            RenderOutput r_output_item;
+            if (viewer_) {
+                std::lock_guard<std::mutex> lock(viewer_->splat_mtx_);
+                r_output_item = render_fn_item();
+            } else {
+                r_output_item = render_fn_item();
+            }
+
+            if (bilateral_grid_ && params_.optimization.use_bilateral_grid) {
+                r_output_item.image = bilateral_grid_->apply(r_output_item.image, cam->uid());
+            }
+
+            rendered_images_list.push_back(r_output_item.image);
+            gt_images_list.push_back(current_gt_image);
+            if (&item == &batch_data.back()) { // Check if it's the last item
+                last_r_output = r_output_item;
+            }
         }
 
-        // Apply bilateral grid if enabled
-        if (bilateral_grid_ && params_.optimization.use_bilateral_grid) {
-            r_output.image = bilateral_grid_->apply(r_output.image, cam->uid());
+        if (rendered_images_list.empty()) {
+             std::cerr << "Warning: No images rendered in batch at iteration " << iter << std::endl;
+            return true; // Continue training, maybe log this
         }
-        // Compute loss using the factored-out function
-        torch::Tensor loss = compute_loss(r_output,
-                                          gt_image,
+
+        torch::Tensor batched_rendered_images = torch::stack(rendered_images_list);
+        torch::Tensor batched_gt_images = torch::stack(gt_images_list);
+
+        // Construct a RenderOutput for compute_loss. It mainly uses .image.
+        // Other fields like valid_mask, depth, alpha are not used by compute_loss directly.
+        // If they were, this would need more careful handling for batching.
+        RenderOutput batched_r_output;
+        batched_r_output.image = batched_rendered_images;
+        // If other fields from last_r_output are needed by strategy or other parts,
+        // they are available in last_r_output. For compute_loss, only .image is used.
+
+        torch::Tensor loss = compute_loss(batched_r_output, // Pass RenderOutput with batched image
+                                          batched_gt_images,
                                           strategy_->get_model(),
                                           params_.optimization);
 
         current_loss_ = loss.item<float>();
-
         loss.backward();
 
         {
             torch::NoGradGuard no_grad;
 
-            // Clean evaluation - let the evaluator handle everything
+            // Evaluation: Note that val_dataset_ is not batched here.
+            // evaluator_->evaluate might need adjustment if it expects batching or if we want to eval full batches.
+            // For now, it will use its internal dataloading which is likely single image.
             if (evaluator_->is_enabled() && evaluator_->should_evaluate(iter)) {
                 evaluator_->print_evaluation_header(iter);
                 auto metrics = evaluator_->evaluate(iter,
                                                     strategy_->get_model(),
-                                                    val_dataset_,
+                                                    val_dataset_, // val_dataset_ is not changed by batching train data
                                                     background_);
                 std::cout << metrics.to_string() << std::endl;
             }
@@ -247,8 +299,10 @@ namespace gs {
                 }
             }
 
+            // The strategy part uses last_r_output from the loop.
+            // This might be an approximation if the strategy needs batched info.
             auto do_strategy = [&]() {
-                strategy_->post_backward(iter, r_output);
+                strategy_->post_backward(iter, last_r_output);
                 strategy_->step(iter);
             };
 
@@ -260,6 +314,8 @@ namespace gs {
             }
 
             if (params_.optimization.use_bilateral_grid) {
+                // This optimizer is for the bilateral_grid_ parameters itself,
+                // which are shared across all items. So, one step is correct.
                 bilateral_grid_optimizer_->step();
                 bilateral_grid_optimizer_->zero_grad(true);
             }
@@ -305,25 +361,30 @@ namespace gs {
         int iter = 1;
         const int epochs_needed = (params_.optimization.iterations + train_dataset_size_ - 1) / train_dataset_size_;
 
-        const int num_workers = 4;
+        const int num_workers = 4; // This could also be made configurable later if needed
+        const int batch_size = params_.optimization.batch_size;
 
         const RenderMode render_mode = stringToRenderMode(params_.optimization.render_mode);
 
         bool should_continue = true;
 
         for (int epoch = 0; epoch < epochs_needed && should_continue; ++epoch) {
-            auto train_dataloader = create_dataloader_from_dataset(train_dataset_, num_workers);
+            auto train_dataloader = create_dataloader_from_dataset(train_dataset_, batch_size, num_workers);
 
-            for (auto& batch : *train_dataloader) {
-                auto camera_with_image = batch[0].data;
-                Camera* cam = camera_with_image.camera;
-                torch::Tensor gt_image = std::move(camera_with_image.image);
-
-                if (params_.optimization.accelerate_data_loading) {
-                    gt_image = gt_image.to(torch::kCUDA, /*non_blocking=*/true);
+            for (auto& batched_examples : *train_dataloader) {
+                // batched_examples is std::vector<torch::data::Example<CameraWithImage, torch::Tensor>>
+                std::vector<CameraWithImage> current_batch_data;
+                current_batch_data.reserve(batched_examples.size());
+                for (auto& example : batched_examples) {
+                    current_batch_data.push_back(std::move(example.data));
                 }
 
-                should_continue = train_step(iter, cam, gt_image, render_mode);
+                // The gt_image.to(torch::kCUDA) call is removed from here.
+                // It will be handled inside train_step for each image if accelerate_data_loading is true.
+
+                // train_step will be modified in the next step to accept std::vector<CameraWithImage>
+                // For now, this call will be a compile error until train_step's signature is updated.
+                should_continue = train_step(iter, current_batch_data, render_mode);
 
                 if (!should_continue) {
                     break;

@@ -123,7 +123,8 @@ namespace gs {
                     {"steps_scaler", defaults.steps_scaler, "Scales the training steps and values"},
                     {"sh_degree_interval", defaults.sh_degree_interval, "Interval for increasing SH degree"},
                     {"selective_adam", defaults.selective_adam, "Selective Adam optimizer flag"},
-                    {"accelerate_data_loading", defaults.accelerate_data_loading, "Accelerate data loading using pinned memory and early GPU transfer"}};
+                    {"accelerate_data_loading", defaults.accelerate_data_loading, "Accelerate data loading using pinned memory and early GPU transfer"},
+                    {"batch_size", defaults.batch_size, "Number of images to process in a batch"}};
 
                 // Check all expected parameters
                 for (const auto& param : expected_params) {
@@ -331,6 +332,13 @@ namespace gs {
             if (json.contains("accelerate_data_loading")) {
                 params.accelerate_data_loading = json["accelerate_data_loading"];
             }
+            if (json.contains("batch_size")) {
+                params.batch_size = json["batch_size"];
+                if (params.batch_size <= 0) {
+                    std::cerr << "Warning: batch_size must be positive. Setting to 1." << std::endl;
+                    params.batch_size = 1;
+                }
+            }
             return params;
         }
 
@@ -404,6 +412,7 @@ namespace gs {
             opt_json["sh_degree_interval"] = params.optimization.sh_degree_interval;
             opt_json["selective_adam"] = params.optimization.selective_adam;
             opt_json["accelerate_data_loading"] = params.optimization.accelerate_data_loading;
+            opt_json["batch_size"] = params.optimization.batch_size;
 
             json["optimization"] = opt_json;
 
