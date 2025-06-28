@@ -33,5 +33,6 @@
   "selective_adam": false,
   "accelerate_data_loading": false,
   "batch_size": 1,
-  "cuda_device_id": 0
+  "cuda_device_id": 0,
+  "preload_images_to_cpu": false
 }

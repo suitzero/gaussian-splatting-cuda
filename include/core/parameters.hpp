@@ -48,6 +48,7 @@ namespace gs {
             bool accelerate_data_loading = false;
             int batch_size = 1;
             int cuda_device_id = 0;
+            bool preload_images_to_cpu = false;
         };
 
         struct DatasetConfig {

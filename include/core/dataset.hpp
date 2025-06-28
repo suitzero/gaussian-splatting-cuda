@@ -6,6 +6,9 @@
 #include <memory>
 #include <torch/torch.h>
 #include <vector>
+#include <iostream> // For std::cout
+#include <chrono>   // For timing
+#include <iomanip>  // For std::fixed, std::setprecision
 
 // Camera with loaded image
 struct CameraWithImage {
@@ -56,14 +59,19 @@ public:
             throw std::out_of_range("Dataset index out of range");
         }
 
-        size_t camera_idx = _indices[index];
-        auto& cam = _cameras[camera_idx];
+        size_t original_camera_idx = _indices[index]; // 'index' is from sampler, map to original camera list index
+        Camera* cam_ptr = _cameras[original_camera_idx].get();
 
-        // Just load image - no prefetching since indices are random
-        torch::Tensor image = cam->load_and_get_image(_datasetConfig.resolution);
-
-        // Return camera pointer and image
-        return {{cam.get(), std::move(image)}, torch::empty({})};
+        if (preloaded_cpu_image_data_.has_value()) {
+            // 'index' directly maps to the preloaded tensor's first dimension
+            // as preloaded_cpu_image_data_ was created based on iterating _indices
+            torch::Tensor image_to_return = preloaded_cpu_image_data_.value().index({(int64_t)index});
+            return {{cam_ptr, std::move(image_to_return)}, torch::empty({})};
+        } else {
+            // Original path: load image on demand
+            torch::Tensor image = cam_ptr->load_and_get_image(_datasetConfig.resolution);
+            return {{cam_ptr, std::move(image)}, torch::empty({})};
+        }
     }
 
     torch::optional<size_t> size() const override {
@@ -76,12 +84,18 @@ public:
 
     Split get_split() const { return _split; }
 
+    // Method to preload images to CPU RAM
+    void try_preload_images_to_cpu(const gs::param::OptimizationParameters& optim_params, const std::string& dataset_name);
+
 private:
     std::vector<std::shared_ptr<Camera>> _cameras;
     const gs::param::DatasetConfig& _datasetConfig;
     Split _split;
     std::vector<size_t> _indices;
+    torch::optional<torch::Tensor> preloaded_cpu_image_data_; // Holds all images for this dataset split if preloaded
 };
+
+// Note: Implementation of CameraDataset::try_preload_images_to_cpu is now in src/dataset.cpp
 
 inline std::tuple<std::shared_ptr<CameraDataset>, torch::Tensor> create_dataset_from_colmap(
     const gs::param::DatasetConfig& datasetConfig) {

@@ -125,7 +125,8 @@ namespace gs {
                     {"selective_adam", defaults.selective_adam, "Selective Adam optimizer flag"},
                     {"accelerate_data_loading", defaults.accelerate_data_loading, "Accelerate data loading using pinned memory and early GPU transfer"},
                     {"batch_size", defaults.batch_size, "Number of images to process in a batch"},
-                    {"cuda_device_id", defaults.cuda_device_id, "CUDA device ID to use for training"}};
+                    {"cuda_device_id", defaults.cuda_device_id, "CUDA device ID to use for training"},
+                    {"preload_images_to_cpu", defaults.preload_images_to_cpu, "Preload all dataset images to CPU RAM at startup"}};
 
                 // Check all expected parameters
                 for (const auto& param : expected_params) {
@@ -347,6 +348,9 @@ namespace gs {
                     params.cuda_device_id = 0;
                 }
             }
+            if (json.contains("preload_images_to_cpu")) {
+                params.preload_images_to_cpu = json["preload_images_to_cpu"];
+            }
             return params;
         }
 
@@ -422,6 +426,7 @@ namespace gs {
             opt_json["accelerate_data_loading"] = params.optimization.accelerate_data_loading;
             opt_json["batch_size"] = params.optimization.batch_size;
             opt_json["cuda_device_id"] = params.optimization.cuda_device_id;
+            opt_json["preload_images_to_cpu"] = params.optimization.preload_images_to_cpu;
 
             json["optimization"] = opt_json;
 

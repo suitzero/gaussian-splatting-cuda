@@ -129,7 +129,15 @@ namespace gs {
         strategy_->initialize(params.optimization);
 
         // Initialize bilateral grid if enabled
-        initialize_bilateral_grid(); // This might need to be device-aware if it creates CUDA tensors
+        initialize_bilateral_grid(); // This is now device-aware
+
+        // Preload datasets to CPU if configured
+        if (train_dataset_) {
+            train_dataset_->try_preload_images_to_cpu(params_.optimization, "training");
+        }
+        if (val_dataset_) {
+            val_dataset_->try_preload_images_to_cpu(params_.optimization, "validation");
+        }
 
         background_ = torch::tensor({0.f, 0.f, 0.f}, torch::TensorOptions().dtype(torch::kFloat32));
         background_ = background_.to(device_); // Use configured device
