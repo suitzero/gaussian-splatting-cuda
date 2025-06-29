@@ -288,11 +288,11 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
                 atomicAdd(&sm_v_opacities[t], v_opacity_local);
             }
 
-            // For colors, continue with warpSum and single-thread global atomic for now
-            // This is because sm_v_colors would be too large for large CDIM.
-            warpSum<CDIM>(v_rgb_local, warp);
-            if (warp.thread_rank() == 0 && valid) { // Ensure 'valid' check for color too
-                                                 // (original code might have implicitly handled this if v_rgb_local was zero)
+            // For colors, use precision-preserving warp reduction.
+            // The result (sum) will be in lane 0 of the warp.
+            warp_reduce_sum_precise_array<CDIM, false>(v_rgb_local, warp);
+
+            if (warp.thread_rank() == 0 && valid) {
                 int32_t g_idx_for_color = id_batch[t]; // Global Gaussian index
                 float *v_rgb_ptr = (float *)(v_colors) + CDIM * g_idx_for_color;
 #pragma unroll

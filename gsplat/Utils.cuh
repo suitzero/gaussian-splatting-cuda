@@ -135,6 +135,112 @@ template <class WarpT> inline __device__ void warpMax(float &val, WarpT &warp) {
     val = cg::reduce(warp, val, cg::greater<float>());
 }
 
+
+// Precision-preserving warp reduction sum from LiteGS
+// Reduces data across the warp and stores the sum in the first thread's 'data'.
+// Other threads' 'data' becomes undefined.
+template <bool broadcast = false>
+__device__ inline void warp_reduce_sum_precise(float &data, const cg::thread_block_tile<32> &warp) {
+    if (warp.size() == 1) return; // Avoid issues with single-thread warps if they occur
+
+    // Step 1: Find max exponent in the warp
+    int max_exponent = (__float_as_uint(data) >> 23) & 0xFF; // Extract exponent
+    max_exponent = warp.reduce(max_exponent, cg::max<int>()); // Max exponent in warp
+
+    // Step 2: Calculate scale factor based on max exponent
+    // Target exponent for scaled integers (e.g., 23 for full mantissa, can be less)
+    // The goal is to scale numbers so their sum fits in integer without losing too much precision.
+    // Let's aim to preserve some fractional bits if possible.
+    int target_int_exponent = 23; // How many bits we want for integer part after scaling
+    int scale_exponent = target_int_exponent - (max_exponent - 127); // 127 is float exponent bias
+
+    float scaler = 1.0f;
+    float inv_scaler = 1.0f;
+    bool use_scaling = (max_exponent > 0) && (max_exponent < 255); // Avoid inf/nan/denormals for scaling
+
+    if (use_scaling) {
+        // Clamp scale_exponent to avoid extreme scales leading to overflow/underflow of scaler itself
+        // Max float exponent is ~127, min is ~-126.
+        // If scale_exponent is too large, scaler overflows. If too small, inv_scaler overflows.
+        if (scale_exponent > 126) scale_exponent = 126;
+        if (scale_exponent < -126) scale_exponent = -126;
+
+        scaler = __uint_as_float(static_cast<unsigned int>((scale_exponent + 127) << 23));
+        inv_scaler = __uint_as_float(static_cast<unsigned int>(((127 - scale_exponent) << 23)));
+    }
+
+    // Step 3: Scale data to integer, sum, then scale back
+    int scaled_value = static_cast<int>(data * scaler);
+    scaled_value = warp.reduce(scaled_value, cg::plus<int>());
+
+    if (use_scaling) {
+        data = static_cast<float>(scaled_value) * inv_scaler;
+    } else {
+        // Fallback to direct float sum if scaling is problematic (e.g. all zeros, NaNs, Infs)
+        // This path might be taken if max_exponent was 0 (all zeros/denormals) or 255 (NaN/Inf)
+        // cg::reduce should handle these standard float sums correctly.
+        data = warp.reduce(data, cg::plus<float>());
+    }
+
+    if (broadcast) { // If true, broadcast sum from lane 0 to all lanes
+        data = warp.shfl(data, 0);
+    }
+}
+
+
+template <bool broadcast = false>
+__device__ inline void warp_reduce_sum_precise(vec2 &data, const cg::thread_block_tile<32> &warp) {
+    if (warp.size() == 1) return;
+    // Process components individually
+    float data_x = data.x;
+    float data_y = data.y;
+    warp_reduce_sum_precise<false>(data_x, warp); // sum to lane 0
+    warp_reduce_sum_precise<false>(data_y, warp); // sum to lane 0
+    data.x = data_x;
+    data.y = data_y;
+    if (broadcast) {
+        data.x = warp.shfl(data.x, 0);
+        data.y = warp.shfl(data.y, 0);
+    }
+}
+
+template <bool broadcast = false>
+__device__ inline void warp_reduce_sum_precise(vec3 &data, const cg::thread_block_tile<32> &warp) {
+    if (warp.size() == 1) return;
+    float data_x = data.x;
+    float data_y = data.y;
+    float data_z = data.z;
+    warp_reduce_sum_precise<false>(data_x, warp);
+    warp_reduce_sum_precise<false>(data_y, warp);
+    warp_reduce_sum_precise<false>(data_z, warp);
+    data.x = data_x;
+    data.y = data_y;
+    data.z = data_z;
+    if (broadcast) {
+        data.x = warp.shfl(data.x, 0);
+        data.y = warp.shfl(data.y, 0);
+        data.z = warp.shfl(data.z, 0);
+    }
+}
+
+// Version for float arrays (e.g. colors with CDIM)
+// Accumulates into val[0] for each dimension
+template <uint32_t DIM, bool broadcast = false>
+__device__ inline void warp_reduce_sum_precise_array(float *val, const cg::thread_block_tile<32> &warp) {
+    if (warp.size() == 1) return;
+    #pragma unroll
+    for (uint32_t i = 0; i < DIM; ++i) {
+        warp_reduce_sum_precise<false>(val[i], warp); // Each val[i] is summed to its lane 0 copy
+    }
+    if (broadcast) {
+        #pragma unroll
+        for (uint32_t i = 0; i < DIM; ++i) {
+            val[i] = warp.shfl(val[i], 0);
+        }
+    }
+}
+
+
 ///////////////////////////////
 // Quaternion
 ///////////////////////////////
