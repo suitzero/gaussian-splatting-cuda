@@ -95,13 +95,29 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
         (range_end - range_start + block_size - 1) / block_size;
 
     extern __shared__ int s[];
-    int32_t *id_batch = (int32_t *)s; // [block_size]
-    vec3 *xy_opacity_batch =
-        reinterpret_cast<vec3 *>(&id_batch[block_size]); // [block_size]
-    vec3 *conic_batch =
-        reinterpret_cast<vec3 *>(&xy_opacity_batch[block_size]); // [block_size]
-    float *rgbs_batch =
-        (float *)&conic_batch[block_size]; // [block_size * CDIM]
+    char *s_ptr = reinterpret_cast<char *>(s);
+
+    int32_t *id_batch = reinterpret_cast<int32_t *>(s_ptr);
+    s_ptr += block_size * sizeof(int32_t);
+    vec3 *xy_opacity_batch = reinterpret_cast<vec3 *>(s_ptr);
+    s_ptr += block_size * sizeof(vec3);
+    vec3 *conic_batch = reinterpret_cast<vec3 *>(s_ptr);
+    s_ptr += block_size * sizeof(vec3);
+    float *rgbs_batch = reinterpret_cast<float *>(s_ptr);
+    s_ptr += block_size * CDIM * sizeof(float);
+
+    // Shared memory for gradient accumulation (geometric parts)
+    vec3 *sm_v_conics = reinterpret_cast<vec3 *>(s_ptr);
+    s_ptr += block_size * sizeof(vec3);
+    vec2 *sm_v_means2d = reinterpret_cast<vec2 *>(s_ptr);
+    s_ptr += block_size * sizeof(vec2);
+    float *sm_v_opacities = reinterpret_cast<float *>(s_ptr);
+    s_ptr += block_size * sizeof(float);
+    vec2 *sm_v_means2d_abs = nullptr;
+    if (v_means2d_abs != nullptr) {
+        sm_v_means2d_abs = reinterpret_cast<vec2 *>(s_ptr);
+        s_ptr += block_size * sizeof(vec2);
+    }
 
     // this is the T AFTER the last gaussian in this pixel
     float T_final = 1.0f - render_alphas[pix_id];
@@ -128,6 +144,18 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
     for (uint32_t b = 0; b < num_batches; ++b) {
         // resync all threads before writing next batch of shared mem
         block.sync();
+
+        // Zero out shared memory for gradient accumulation for the current batch
+        // Each thread zeros out one element if its tr < block_size (actual batch_size could be smaller)
+        if (tr < block_size) { // Check against full block_size to cover all potential indices
+            sm_v_conics[tr] = {0.0f, 0.0f, 0.0f};
+            sm_v_means2d[tr] = {0.0f, 0.0f};
+            sm_v_opacities[tr] = 0.0f;
+            if (v_means2d_abs != nullptr) {
+                sm_v_means2d_abs[tr] = {0.0f, 0.0f};
+            }
+        }
+        block.sync(); // Ensure zeroing is complete before loading new data
 
         // each thread fetch 1 gaussian from back to front
         // 0 index will be furthest back in batch
@@ -241,40 +269,79 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
                     buffer[k] += rgbs_batch[t * CDIM + k] * fac;
                 }
             }
-            warpSum<CDIM>(v_rgb_local, warp);
-            warpSum(v_conic_local, warp);
-            warpSum(v_xy_local, warp);
-            if (v_means2d_abs != nullptr) {
-                warpSum(v_xy_abs_local, warp);
-            }
-            warpSum(v_opacity_local, warp);
-            if (warp.thread_rank() == 0) {
-                int32_t g = id_batch[t]; // flatten index in [C * N] or [nnz]
-                float *v_rgb_ptr = (float *)(v_colors) + CDIM * g;
-#pragma unroll
-                for (uint32_t k = 0; k < CDIM; ++k) {
-                    gpuAtomicAdd(v_rgb_ptr + k, v_rgb_local[k]);
-                }
+            // Accumulate geometric gradients into shared memory using atomicAdd
+            // v_rgb_local still uses warpSum then global atomic for now due to CDIM constraints
+            // Note: v_conic_local, v_xy_local etc. here are the per-pixel, pre-warpSum values.
+            // The 't' here is the index within the current shared memory batch.
+            if (valid) { // only accumulate if this pixel contributed
+                atomicAdd(&sm_v_conics[t].x, v_conic_local.x);
+                atomicAdd(&sm_v_conics[t].y, v_conic_local.y);
+                atomicAdd(&sm_v_conics[t].z, v_conic_local.z);
 
-                float *v_conic_ptr = (float *)(v_conics) + 3 * g;
-                gpuAtomicAdd(v_conic_ptr, v_conic_local.x);
-                gpuAtomicAdd(v_conic_ptr + 1, v_conic_local.y);
-                gpuAtomicAdd(v_conic_ptr + 2, v_conic_local.z);
-
-                float *v_xy_ptr = (float *)(v_means2d) + 2 * g;
-                gpuAtomicAdd(v_xy_ptr, v_xy_local.x);
-                gpuAtomicAdd(v_xy_ptr + 1, v_xy_local.y);
+                atomicAdd(&sm_v_means2d[t].x, v_xy_local.x);
+                atomicAdd(&sm_v_means2d[t].y, v_xy_local.y);
 
                 if (v_means2d_abs != nullptr) {
-                    float *v_xy_abs_ptr = (float *)(v_means2d_abs) + 2 * g;
-                    gpuAtomicAdd(v_xy_abs_ptr, v_xy_abs_local.x);
-                    gpuAtomicAdd(v_xy_abs_ptr + 1, v_xy_abs_local.y);
+                    atomicAdd(&sm_v_means2d_abs[t].x, v_xy_abs_local.x);
+                    atomicAdd(&sm_v_means2d_abs[t].y, v_xy_abs_local.y);
                 }
+                atomicAdd(&sm_v_opacities[t], v_opacity_local);
+            }
 
-                gpuAtomicAdd(v_opacities + g, v_opacity_local);
+            // For colors, continue with warpSum and single-thread global atomic for now
+            // This is because sm_v_colors would be too large for large CDIM.
+            warpSum<CDIM>(v_rgb_local, warp);
+            if (warp.thread_rank() == 0 && valid) { // Ensure 'valid' check for color too
+                                                 // (original code might have implicitly handled this if v_rgb_local was zero)
+                int32_t g_idx_for_color = id_batch[t]; // Global Gaussian index
+                float *v_rgb_ptr = (float *)(v_colors) + CDIM * g_idx_for_color;
+#pragma unroll
+                for (uint32_t k = 0; k < CDIM; ++k) {
+                    if (v_rgb_local[k] != 0.0f) { // Avoid atomic if value is zero
+                        gpuAtomicAdd(v_rgb_ptr + k, v_rgb_local[k]);
+                    }
+                }
+            }
+        } // End loop over Gaussians 't' in the current shared batch
+
+        // After all pixels in the tile have processed all Gaussians in the id_batch,
+        // and accumulated geometric grads into shared memory.
+        block.sync();
+
+        // Now, write the reduced geometric gradients from shared memory to global memory.
+        // Each thread 'tr' in the block handles one Gaussian from the shared batch if tr < batch_size.
+        // (batch_size was calculated at the start of the 'b' loop)
+        if (tr < batch_size) { // batch_size for the current gaussian load batch
+            int32_t g = id_batch[tr]; // Global Gaussian index for shared memory item 'tr'
+
+            if (sm_v_conics[tr].x != 0.0f || sm_v_conics[tr].y != 0.0f || sm_v_conics[tr].z != 0.0f) {
+                float *v_conic_ptr = (float *)(v_conics) + 3 * g;
+                gpuAtomicAdd(v_conic_ptr, sm_v_conics[tr].x);
+                gpuAtomicAdd(v_conic_ptr + 1, sm_v_conics[tr].y);
+                gpuAtomicAdd(v_conic_ptr + 2, sm_v_conics[tr].z);
+            }
+
+            if (sm_v_means2d[tr].x != 0.0f || sm_v_means2d[tr].y != 0.0f) {
+                float *v_xy_ptr = (float *)(v_means2d) + 2 * g;
+                gpuAtomicAdd(v_xy_ptr, sm_v_means2d[tr].x);
+                gpuAtomicAdd(v_xy_ptr + 1, sm_v_means2d[tr].y);
+            }
+
+            if (v_means2d_abs != nullptr) {
+                if (sm_v_means2d_abs[tr].x != 0.0f || sm_v_means2d_abs[tr].y != 0.0f) {
+                    float *v_xy_abs_ptr = (float *)(v_means2d_abs) + 2 * g;
+                    gpuAtomicAdd(v_xy_abs_ptr, sm_v_means2d_abs[tr].x);
+                    gpuAtomicAdd(v_xy_abs_ptr + 1, sm_v_means2d_abs[tr].y);
+                }
+            }
+
+            if (sm_v_opacities[tr] != 0.0f) {
+                gpuAtomicAdd(v_opacities + g, sm_v_opacities[tr]);
             }
         }
-    }
+        // block.sync(); // Potentially needed if there's another operation depending on these global writes within the same 'b' loop.
+                     // But since this is the end of the 'b' loop iteration, the sync at the start of the next 'b' loop handles it.
+    } // End loop over batches 'b'
 }
 
 template <uint32_t CDIM>
@@ -319,9 +386,27 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
     dim3 threads = {tile_size, tile_size, 1};
     dim3 grid = {C, tile_height, tile_width};
 
-    int64_t shmem_size =
-        tile_size * tile_size *
-        (sizeof(int32_t) + sizeof(vec3) + sizeof(vec3) + sizeof(float) * CDIM);
+    uint32_t block_s = tile_size * tile_size; // num threads in block
+
+    int64_t shmem_data_size =
+        block_s *
+        (sizeof(int32_t)    // id_batch
+         + sizeof(vec3)     // xy_opacity_batch
+         + sizeof(vec3)     // conic_batch
+         + sizeof(float) * CDIM // rgbs_batch
+        );
+
+    int64_t shmem_grad_geom_size =
+        block_s *
+        (sizeof(vec3)    // sm_v_conics
+         + sizeof(vec2)    // sm_v_means2d
+         + sizeof(float)   // sm_v_opacities
+        );
+    if (v_means2d_abs.has_value()) {
+        shmem_grad_geom_size += block_s * sizeof(vec2); // sm_v_means2d_abs
+    }
+
+    int64_t shmem_size = shmem_data_size + shmem_grad_geom_size;
 
     if (n_isects == 0) {
         // skip the kernel launch if there are no elements

@@ -159,29 +159,92 @@ __global__ void projection_ewa_3dgs_fused_fwd_kernel(
     // compute the inverse of the 2d covariance
     mat2 covar2d_inv = glm::inverse(covar2d);
 
-    float extend = 3.33f;
+    float extend_factor = 3.33f; // Base extend factor
     if (opacities != nullptr) {
-        float opacity = opacities[gid];
-        if (compensations != nullptr) {
-            // we assume compensation term will be applied later on.
-            opacity *= compensation;
+        float current_opacity = opacities[gid];
+        if (compensations != nullptr && compensation > 0.0f) { // Use the computed compensation
+            // The 'compensation' variable is computed from add_blur
+            // It's sqrt(det_orig / det_blur). If we apply it to opacity,
+            // opacity_effective = opacity * compensation.
+            // This seems to be what the original code intended if compensations is not null.
+            current_opacity *= compensation;
         }
-        if (opacity < ALPHA_THRESHOLD) {
+        if (current_opacity < ALPHA_THRESHOLD) {
             radii[idx * 2] = 0;
             radii[idx * 2 + 1] = 0;
             return;
         }
-        // Compute opacity-aware bounding box.
-        // https://arxiv.org/pdf/2402.00525 Section B.2
-        extend = min(extend, sqrt(2.0f * __logf(opacity / ALPHA_THRESHOLD)));
+        // Opacity-aware extend factor from LiteGS / SuGaR
+        // extend_factor = min(extend_factor, sqrtf(2.0f * logf(max(1.01f, current_opacity / ALPHA_THRESHOLD))));
+        // A slightly safer version to avoid logf(<=0) or logf(small_value_close_to_1)
+         float ratio = current_opacity / ALPHA_THRESHOLD;
+         if (ratio > 1.0f) { // Only apply if opacity is meaningfully above threshold
+            extend_factor = min(extend_factor, sqrtf(max(0.1f, 2.0f * __logf(ratio))));
+         } else { // If opacity is at or below threshold (but > ALPHA_THRESHOLD), use a small extend or default
+            extend_factor = min(extend_factor, 1.0f); // Or some other small factor
+         }
     }
 
-    // compute tight rectangular bounding box (non differentiable)
-    // https://arxiv.org/pdf/2402.00525
-    float radius_x = ceilf(extend * sqrtf(covar2d[0][0]));
-    float radius_y = ceilf(extend * sqrtf(covar2d[1][1]));
+    // Tighter AABB calculation for rotated ellipse
+    // covar2d = [[A, B], [B, C]]
+    float A = covar2d[0][0]; // variance_x
+    float B = covar2d[0][1]; // covariance_xy
+    float C = covar2d[1][1]; // variance_y
 
-    if (radius_x <= radius_clip && radius_y <= radius_clip) {
+    float radius_x, radius_y;
+
+    // Handle near-zero determinant case or when B is zero (axis-aligned)
+    // The determinant was already checked by `add_blur` (det_blur > 0.f)
+    // If B is very small, effectively axis aligned
+    if (fabsf(B) < 1e-5f) { // Threshold for axis-aligned
+        radius_x = ceilf(extend_factor * sqrtf(A));
+        radius_y = ceilf(extend_factor * sqrtf(C));
+    } else {
+        float T = A + C;
+        float D_sqrt_val = (A - C) * (A - C) + 4.0f * B * B;
+        // Ensure D_sqrt_val is non-negative (should be due to symmetric positive semi-definiteness of covar)
+        // but floating point errors might occur if covar2d was ill-conditioned before add_blur.
+        // add_blur should have made it positive definite.
+        float D_sqrt = sqrtf(max(0.0f, D_sqrt_val));
+
+        float lambda1 = (T + D_sqrt) / 2.0f; // Eigenvalue 1 (variance along major axis)
+        float lambda2 = (T - D_sqrt) / 2.0f; // Eigenvalue 2 (variance along minor axis)
+
+        // Eigenvalues must be non-negative. sqrtf will handle this.
+        // lambda1 is always >= lambda2.
+        // Clamp to avoid issues if they are near zero due to earlier operations, though add_blur should prevent this.
+        float s1 = sqrtf(max(0.0f, lambda1)); // semi-axis 1
+        float s2 = sqrtf(max(0.0f, lambda2)); // semi-axis 2
+
+        float cos_phi_sq, sin_phi_sq;
+        if (fabsf(A - C) < 1e-5f && fabsf(B) < 1e-5f) { // Circle or nearly so, or already axis aligned from B check
+             cos_phi_sq = 1.0f; sin_phi_sq = 0.0f; // Effectively axis aligned
+        } else if (fabsf(B) < 1e-5f) { // Already axis-aligned (redundant with earlier B check but safe)
+            cos_phi_sq = 1.0f; sin_phi_sq = 0.0f;
+        } else {
+            // Angle phi for the eigenvector corresponding to lambda1
+            // cos(2*phi) = (A-C)/D_sqrt
+            // sin(2*phi) = 2B/D_sqrt
+            // cos^2(phi) = (1 + cos(2*phi))/2
+            // sin^2(phi) = (1 - cos(2*phi))/2
+            float cos2phi = (A - C) / D_sqrt; // D_sqrt can't be zero if B is not zero
+            cos_phi_sq = (1.0f + cos2phi) / 2.0f;
+            sin_phi_sq = (1.0f - cos2phi) / 2.0f;
+        }
+
+        // Radius of AABB for rotated ellipse:
+        // R_x^2 = s1^2 * cos^2(phi) + s2^2 * sin^2(phi)
+        // R_y^2 = s1^2 * sin^2(phi) + s2^2 * cos^2(phi)
+        // (These are variances along x and y for the AABB)
+        float var_x_aabb = lambda1 * cos_phi_sq + lambda2 * sin_phi_sq;
+        float var_y_aabb = lambda1 * sin_phi_sq + lambda2 * cos_phi_sq;
+
+        radius_x = ceilf(extend_factor * sqrtf(max(0.0f, var_x_aabb)));
+        radius_y = ceilf(extend_factor * sqrtf(max(0.0f, var_y_aabb)));
+    }
+
+
+    if (radius_x <= radius_clip && radius_y <= radius_clip) { // Note: original uses ||, but && seems more logical to clip tiny gaussians
         radii[idx * 2] = 0;
         radii[idx * 2 + 1] = 0;
         return;

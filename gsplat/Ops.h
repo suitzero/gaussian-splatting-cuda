@@ -5,6 +5,7 @@
 
 #include "Cameras.h"
 #include "Common.h"
+#include "MortonCodes.h" // Include MortonCodes header
 
 namespace gsplat {
 

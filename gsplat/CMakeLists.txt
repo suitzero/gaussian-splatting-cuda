@@ -10,6 +10,7 @@ set(GSPLAT_SOURCES
         # C++ files
         Adam.cpp
         Intersect.cpp
+        MortonCodes.cpp # Will add this if we need a C++ wrapper, for now .h is enough for kernel call
         Null.cpp
         Projection.cpp
         QuatScaleToCovar.cpp
@@ -20,6 +21,7 @@ set(GSPLAT_SOURCES
         # CUDA files
         AdamCUDA.cu
         IntersectTile.cu
+        MortonCodes.cu
         NullCUDA.cu
         ProjectionEWA3DGSFused.cu
         ProjectionEWA3DGSPacked.cu
@@ -34,6 +36,10 @@ set(GSPLAT_SOURCES
         RelocationCUDA.cu
         SphericalHarmonicsCUDA.cu
 )
+
+# Add MortonCodes.cpp if it exists (e.g., for C++ callable functions beyond kernel launch)
+# For now, we only have .cu and .h for the kernel
+# If we add a MortonCodes.cpp, it would be listed in GSPLAT_SOURCES above.
 
 # One unified library
 add_library(gsplat_backend STATIC ${GSPLAT_SOURCES})
