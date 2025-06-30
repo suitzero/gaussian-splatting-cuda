@@ -95,13 +95,31 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
         (range_end - range_start + block_size - 1) / block_size;
 
     extern __shared__ int s[];
+    // Gaussian data batch
     int32_t *id_batch = (int32_t *)s; // [block_size]
     vec3 *xy_opacity_batch =
         reinterpret_cast<vec3 *>(&id_batch[block_size]); // [block_size]
     vec3 *conic_batch =
         reinterpret_cast<vec3 *>(&xy_opacity_batch[block_size]); // [block_size]
     float *rgbs_batch =
-        (float *)&conic_batch[block_size]; // [block_size * CDIM]
+        reinterpret_cast<float *>(&conic_batch[block_size]); // [block_size * CDIM]
+
+    // Gradient accumulators batch (matches Gaussian data batch structure)
+    // Note: block_size is tile_size * tile_size
+    // These pointers will be offset after rgbs_batch
+    float *s_v_colors_batch =
+        reinterpret_cast<float *>(&rgbs_batch[block_size * CDIM]); // [block_size * CDIM]
+    vec2 *s_v_means2d_batch =
+        reinterpret_cast<vec2 *>(&s_v_colors_batch[block_size * CDIM]); // [block_size]
+    vec3 *s_v_conics_batch =
+        reinterpret_cast<vec3 *>(&s_v_means2d_batch[block_size]); // [block_size]
+    float *s_v_opacities_batch =
+        reinterpret_cast<float *>(&s_v_conics_batch[block_size]); // [block_size]
+    vec2 *s_v_means2d_abs_batch = nullptr;
+    if (v_means2d_abs != nullptr) {
+        s_v_means2d_abs_batch =
+            reinterpret_cast<vec2 *>(&s_v_opacities_batch[block_size]); // [block_size]
+    }
 
     // this is the T AFTER the last gaussian in this pixel
     float T_final = 1.0f - render_alphas[pix_id];
@@ -135,11 +153,12 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
         // batch end is the index of the last gaussian in the batch
         // These values can be negative so must be int32 instead of uint32
         const int32_t batch_end = range_end - 1 - block_size * b;
-        const int32_t batch_size = min(block_size, batch_end + 1 - range_start);
+        const int32_t current_batch_actual_size = min(block_size, batch_end + 1 - range_start); // Renamed batch_size to current_batch_actual_size to avoid conflict
         const int32_t idx = batch_end - tr;
+
         if (idx >= range_start) {
             int32_t g = flatten_ids[idx]; // flatten index in [C * N] or [nnz]
-            id_batch[tr] = g;
+            id_batch[tr] = g; // Store global ID
             const vec2 xy = means2d[g];
             const float opac = opacities[g];
             xy_opacity_batch[tr] = {xy.x, xy.y, opac};
@@ -149,11 +168,29 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
                 rgbs_batch[tr * CDIM + k] = colors[g * CDIM + k];
             }
         }
-        // wait for other threads to collect the gaussians in batch
+
+        // Initialize shared gradient accumulators for this batch
+        // Each thread initializes its corresponding part of the batch arrays
+        if (tr < current_batch_actual_size) {
+#pragma unroll
+            for (uint32_t k = 0; k < CDIM; ++k) {
+                s_v_colors_batch[tr * CDIM + k] = 0.f;
+            }
+            s_v_means2d_batch[tr] = {0.f, 0.f};
+            s_v_conics_batch[tr] = {0.f, 0.f, 0.f};
+            s_v_opacities_batch[tr] = 0.f;
+            if (v_means2d_abs != nullptr) {
+                s_v_means2d_abs_batch[tr] = {0.f, 0.f};
+            }
+        }
+
+        // wait for other threads to collect the gaussians and init grads in batch
         block.sync();
+
         // process gaussians in the current batch for this pixel
         // 0 index is the furthest back gaussian in the batch
-        for (uint32_t t = max(0, batch_end - warp_bin_final); t < batch_size;
+        // Loop bound uses current_batch_actual_size
+        for (uint32_t t = max(0, batch_end - warp_bin_final); t < current_batch_actual_size;
              ++t) {
             bool valid = inside;
             if (batch_end - t > bin_final) {
@@ -249,32 +286,72 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
             }
             warpSum(v_opacity_local, warp);
             if (warp.thread_rank() == 0) {
-                int32_t g = id_batch[t]; // flatten index in [C * N] or [nnz]
-                float *v_rgb_ptr = (float *)(v_colors) + CDIM * g;
+                // Index t is the local index within the current shared memory batch
+                float *s_v_rgb_ptr = s_v_colors_batch + CDIM * t;
 #pragma unroll
                 for (uint32_t k = 0; k < CDIM; ++k) {
-                    gpuAtomicAdd(v_rgb_ptr + k, v_rgb_local[k]);
+                    atomicAdd(s_v_rgb_ptr + k, v_rgb_local[k]);
                 }
 
-                float *v_conic_ptr = (float *)(v_conics) + 3 * g;
-                gpuAtomicAdd(v_conic_ptr, v_conic_local.x);
-                gpuAtomicAdd(v_conic_ptr + 1, v_conic_local.y);
-                gpuAtomicAdd(v_conic_ptr + 2, v_conic_local.z);
+                atomicAdd(&(s_v_conics_batch[t].x), v_conic_local.x);
+                atomicAdd(&(s_v_conics_batch[t].y), v_conic_local.y);
+                atomicAdd(&(s_v_conics_batch[t].z), v_conic_local.z);
 
-                float *v_xy_ptr = (float *)(v_means2d) + 2 * g;
-                gpuAtomicAdd(v_xy_ptr, v_xy_local.x);
-                gpuAtomicAdd(v_xy_ptr + 1, v_xy_local.y);
+                atomicAdd(&(s_v_means2d_batch[t].x), v_xy_local.x);
+                atomicAdd(&(s_v_means2d_batch[t].y), v_xy_local.y);
 
                 if (v_means2d_abs != nullptr) {
-                    float *v_xy_abs_ptr = (float *)(v_means2d_abs) + 2 * g;
-                    gpuAtomicAdd(v_xy_abs_ptr, v_xy_abs_local.x);
-                    gpuAtomicAdd(v_xy_abs_ptr + 1, v_xy_abs_local.y);
+                    atomicAdd(&(s_v_means2d_abs_batch[t].x), v_xy_abs_local.x);
+                    atomicAdd(&(s_v_means2d_abs_batch[t].y), v_xy_abs_local.y);
                 }
+                atomicAdd(s_v_opacities_batch + t, v_opacity_local);
+            }
+        } // end loop over t (gaussians in shared batch for one pixel)
 
-                gpuAtomicAdd(v_opacities + g, v_opacity_local);
+        // After all pixels have processed this batch of Gaussians,
+        // sync and then write accumulated shared grads to global memory.
+        block.sync();
+
+        // Each thread 'tr' in the block handles one Gaussian from the shared batch.
+        if (tr < current_batch_actual_size) {
+            int32_t g = id_batch[tr]; // Global Gaussian ID
+
+            // Atomically add accumulated gradients from shared to global memory
+            float *v_rgb_global_ptr = (float *)(v_colors) + CDIM * g;
+#pragma unroll
+            for (uint32_t k = 0; k < CDIM; ++k) {
+                if (s_v_colors_batch[tr * CDIM + k] != 0.f) // Optional: avoid zero atomics
+                    gpuAtomicAdd(v_rgb_global_ptr + k, s_v_colors_batch[tr * CDIM + k]);
+            }
+
+            if (s_v_conics_batch[tr].x != 0.f || s_v_conics_batch[tr].y != 0.f || s_v_conics_batch[tr].z != 0.f) {
+                float *v_conic_global_ptr = (float *)(v_conics) + 3 * g;
+                gpuAtomicAdd(v_conic_global_ptr + 0, s_v_conics_batch[tr].x);
+                gpuAtomicAdd(v_conic_global_ptr + 1, s_v_conics_batch[tr].y);
+                gpuAtomicAdd(v_conic_global_ptr + 2, s_v_conics_batch[tr].z);
+            }
+
+            if (s_v_means2d_batch[tr].x != 0.f || s_v_means2d_batch[tr].y != 0.f) {
+                float *v_xy_global_ptr = (float *)(v_means2d) + 2 * g;
+                gpuAtomicAdd(v_xy_global_ptr + 0, s_v_means2d_batch[tr].x);
+                gpuAtomicAdd(v_xy_global_ptr + 1, s_v_means2d_batch[tr].y);
+            }
+
+            if (v_means2d_abs != nullptr && (s_v_means2d_abs_batch[tr].x != 0.f || s_v_means2d_abs_batch[tr].y != 0.f)) {
+                float *v_xy_abs_global_ptr = (float *)(v_means2d_abs) + 2 * g;
+                gpuAtomicAdd(v_xy_abs_global_ptr + 0, s_v_means2d_abs_batch[tr].x);
+                gpuAtomicAdd(v_xy_abs_global_ptr + 1, s_v_means2d_abs_batch[tr].y);
+            }
+
+            if (s_v_opacities_batch[tr] != 0.f) {
+                gpuAtomicAdd(v_opacities + g, s_v_opacities_batch[tr]);
             }
         }
-    }
+        // block.sync(); // Potentially needed if there's another operation
+                      // using shared memory immediately after in the b loop,
+                      // but here we are at the end of b loop iteration.
+                      // The sync at the start of b loop should be sufficient.
+    } // end loop over b (batches of Gaussians)
 }
 
 template <uint32_t CDIM>
@@ -319,9 +396,31 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
     dim3 threads = {tile_size, tile_size, 1};
     dim3 grid = {C, tile_height, tile_width};
 
-    int64_t shmem_size =
-        tile_size * tile_size *
-        (sizeof(int32_t) + sizeof(vec3) + sizeof(vec3) + sizeof(float) * CDIM);
+    // Calculate shared memory size
+    // Original: tile_size*tile_size * (sizeof(int32_t) + sizeof(vec3) + sizeof(vec3) + sizeof(float) * CDIM)
+    // New additions:
+    // s_v_colors_batch: tile_size*tile_size * CDIM * sizeof(float)
+    // s_v_means2d_batch: tile_size*tile_size * sizeof(vec2)
+    // s_v_conics_batch: tile_size*tile_size * sizeof(vec3)
+    // s_v_opacities_batch: tile_size*tile_size * sizeof(float)
+    // s_v_means2d_abs_batch (optional): tile_size*tile_size * sizeof(vec2)
+
+    size_t block_elem_count = tile_size * tile_size; // This is blockDim.x * blockDim.y
+    size_t shmem_size_calc = block_elem_count * (
+        sizeof(int32_t) +           // id_batch
+        sizeof(vec3) +              // xy_opacity_batch
+        sizeof(vec3) +              // conic_batch
+        sizeof(float) * CDIM +      // rgbs_batch
+        sizeof(float) * CDIM +      // s_v_colors_batch
+        sizeof(vec2) +              // s_v_means2d_batch
+        sizeof(vec3) +              // s_v_conics_batch
+        sizeof(float)               // s_v_opacities_batch
+    );
+    if (v_means2d_abs.has_value()) {
+        shmem_size_calc += block_elem_count * sizeof(vec2); // s_v_means2d_abs_batch
+    }
+    int64_t shmem_size = static_cast<int64_t>(shmem_size_calc);
+
 
     if (n_isects == 0) {
         // skip the kernel launch if there are no elements

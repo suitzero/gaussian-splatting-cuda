@@ -166,15 +166,31 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
         (range_end - range_start + block_size - 1) / block_size;
 
     extern __shared__ int s[];
+    // Gaussian data batch
     int32_t *id_batch = (int32_t *)s; // [block_size]
-    vec4 *xyz_opacity_batch =
+    vec4 *xyz_opacity_batch = // .w is opacity
         reinterpret_cast<vec4 *>(&id_batch[block_size]); // [block_size]
     vec3 *scale_batch =
         reinterpret_cast<vec3 *>(&xyz_opacity_batch[block_size]); // [block_size]
     vec4 *quat_batch =
         reinterpret_cast<vec4 *>(&scale_batch[block_size]); // [block_size]
-    float *rgbs_batch =
-        (float *)&quat_batch[block_size]; // [block_size * CDIM]
+    float *rgbs_batch = // colors
+        reinterpret_cast<float *>(&quat_batch[block_size]); // [block_size * CDIM]
+
+    // Gradient accumulators batch (matches Gaussian data batch structure)
+    // These pointers will be offset after rgbs_batch
+    // block_size is tile_size * tile_size
+    float *s_v_colors_batch =
+        reinterpret_cast<float *>(&rgbs_batch[block_size * CDIM]); // [block_size * CDIM]
+    vec3 *s_v_means_batch =
+        reinterpret_cast<vec3 *>(&s_v_colors_batch[block_size * CDIM]); // [block_size]
+    vec4 *s_v_quats_batch =
+        reinterpret_cast<vec4 *>(&s_v_means_batch[block_size]); // [block_size]
+    vec3 *s_v_scales_batch =
+        reinterpret_cast<vec3 *>(&s_v_quats_batch[block_size]); // [block_size]
+    float *s_v_opacities_batch =
+        reinterpret_cast<float *>(&s_v_scales_batch[block_size]); // [block_size]
+
 
     // this is the T AFTER the last gaussian in this pixel
     float T_final = 1.0f - render_alphas[pix_id];
@@ -208,15 +224,16 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
         // batch end is the index of the last gaussian in the batch
         // These values can be negative so must be int32 instead of uint32
         const int32_t batch_end = range_end - 1 - block_size * b;
-        const int32_t batch_size = min(block_size, batch_end + 1 - range_start);
+        const int32_t current_batch_actual_size = min(block_size, batch_end + 1 - range_start); // Renamed
         const int32_t idx = batch_end - tr;
+
         if (idx >= range_start) {
             // TODO: only support 1 camera for now so it is ok to abuse the index.
             int32_t g = flatten_ids[idx]; // flatten index in [C * N] or [nnz]
-            id_batch[tr] = g;
-            const vec3 xyz = means[g];
-            const float opac = opacities[g];
-            xyz_opacity_batch[tr] = {xyz.x, xyz.y, xyz.z, opac};
+            id_batch[tr] = g; // Store global ID
+            const vec3 xyz_val = means[g]; // Changed variable name
+            const float opac_val = opacities[g]; // Changed variable name
+            xyz_opacity_batch[tr] = {xyz_val.x, xyz_val.y, xyz_val.z, opac_val};
             scale_batch[tr] = scales[g];
             quat_batch[tr] = quats[g];
 #pragma unroll
@@ -224,11 +241,25 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
                 rgbs_batch[tr * CDIM + k] = colors[g * CDIM + k];
             }
         }
-        // wait for other threads to collect the gaussians in batch
+
+        // Initialize shared gradient accumulators for this batch
+        if (tr < current_batch_actual_size) {
+#pragma unroll
+            for (uint32_t k = 0; k < CDIM; ++k) {
+                s_v_colors_batch[tr * CDIM + k] = 0.f;
+            }
+            s_v_means_batch[tr] = {0.f, 0.f, 0.f};
+            s_v_quats_batch[tr] = {0.f, 0.f, 0.f, 0.f};
+            s_v_scales_batch[tr] = {0.f, 0.f, 0.f};
+            s_v_opacities_batch[tr] = 0.f;
+        }
+
+        // wait for other threads to collect the gaussians and init grads in batch
         block.sync();
+
         // process gaussians in the current batch for this pixel
         // 0 index is the furthest back gaussian in the batch
-        for (uint32_t t = max(0, batch_end - warp_bin_final); t < batch_size;
+        for (uint32_t t = max(0, batch_end - warp_bin_final); t < current_batch_actual_size; // Use current_batch_actual_size
              ++t) {
             bool valid = done;
             if (batch_end - t > bin_final) {
@@ -348,33 +379,74 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
             warpSum(v_quat_local, warp);
             warpSum(v_opacity_local, warp);
             if (warp.thread_rank() == 0) {
-                int32_t g = id_batch[t]; // flatten index in [C * N] or [nnz]
-                float *v_rgb_ptr = (float *)(v_colors) + CDIM * g;
+                // Index t is the local index within the current shared memory batch
+                float *s_v_rgb_ptr = s_v_colors_batch + CDIM * t;
 #pragma unroll
                 for (uint32_t k = 0; k < CDIM; ++k) {
-                    gpuAtomicAdd(v_rgb_ptr + k, v_rgb_local[k]);
+                    atomicAdd(s_v_rgb_ptr + k, v_rgb_local[k]);
                 }
 
-                float *v_mean_ptr = (float *)(v_means) + 3 * g;
-                gpuAtomicAdd(v_mean_ptr, v_mean_local.x);
-                gpuAtomicAdd(v_mean_ptr + 1, v_mean_local.y);
-                gpuAtomicAdd(v_mean_ptr + 2, v_mean_local.z);
+                atomicAdd(&(s_v_means_batch[t].x), v_mean_local.x);
+                atomicAdd(&(s_v_means_batch[t].y), v_mean_local.y);
+                atomicAdd(&(s_v_means_batch[t].z), v_mean_local.z);
 
-                float *v_scale_ptr = (float *)(v_scales) + 3 * g;
-                gpuAtomicAdd(v_scale_ptr, v_scale_local.x);
-                gpuAtomicAdd(v_scale_ptr + 1, v_scale_local.y);
-                gpuAtomicAdd(v_scale_ptr + 2, v_scale_local.z);
+                atomicAdd(&(s_v_scales_batch[t].x), v_scale_local.x);
+                atomicAdd(&(s_v_scales_batch[t].y), v_scale_local.y);
+                atomicAdd(&(s_v_scales_batch[t].z), v_scale_local.z);
 
-                float *v_quat_ptr = (float *)(v_quats) + 4 * g;
-                gpuAtomicAdd(v_quat_ptr, v_quat_local.x);
-                gpuAtomicAdd(v_quat_ptr + 1, v_quat_local.y);
-                gpuAtomicAdd(v_quat_ptr + 2, v_quat_local.z);
-                gpuAtomicAdd(v_quat_ptr + 3, v_quat_local.w);
+                atomicAdd(&(s_v_quats_batch[t].x), v_quat_local.x);
+                atomicAdd(&(s_v_quats_batch[t].y), v_quat_local.y);
+                atomicAdd(&(s_v_quats_batch[t].z), v_quat_local.z);
+                atomicAdd(&(s_v_quats_batch[t].w), v_quat_local.w);
 
-                gpuAtomicAdd(v_opacities + g, v_opacity_local);
+                atomicAdd(s_v_opacities_batch + t, v_opacity_local);
+            }
+        } // end loop over t (gaussians in shared batch for one pixel)
+
+        // After all pixels have processed this batch of Gaussians,
+        // sync and then write accumulated shared grads to global memory.
+        block.sync();
+
+        // Each thread 'tr' in the block handles one Gaussian from the shared batch.
+        if (tr < current_batch_actual_size) {
+            int32_t g = id_batch[tr]; // Global Gaussian ID
+
+            // Atomically add accumulated gradients from shared to global memory
+            float *v_rgb_global_ptr = (float *)(v_colors) + CDIM * g;
+#pragma unroll
+            for (uint32_t k = 0; k < CDIM; ++k) {
+                if (s_v_colors_batch[tr * CDIM + k] != 0.f)
+                    gpuAtomicAdd(v_rgb_global_ptr + k, s_v_colors_batch[tr * CDIM + k]);
+            }
+
+            if (s_v_means_batch[tr].x != 0.f || s_v_means_batch[tr].y != 0.f || s_v_means_batch[tr].z != 0.f) {
+                float *v_mean_global_ptr = (float *)(v_means) + 3 * g;
+                gpuAtomicAdd(v_mean_global_ptr + 0, s_v_means_batch[tr].x);
+                gpuAtomicAdd(v_mean_global_ptr + 1, s_v_means_batch[tr].y);
+                gpuAtomicAdd(v_mean_global_ptr + 2, s_v_means_batch[tr].z);
+            }
+
+            if (s_v_scales_batch[tr].x != 0.f || s_v_scales_batch[tr].y != 0.f || s_v_scales_batch[tr].z != 0.f) {
+                float *v_scale_global_ptr = (float *)(v_scales) + 3 * g;
+                gpuAtomicAdd(v_scale_global_ptr + 0, s_v_scales_batch[tr].x);
+                gpuAtomicAdd(v_scale_global_ptr + 1, s_v_scales_batch[tr].y);
+                gpuAtomicAdd(v_scale_global_ptr + 2, s_v_scales_batch[tr].z);
+            }
+
+            if (s_v_quats_batch[tr].x != 0.f || s_v_quats_batch[tr].y != 0.f || s_v_quats_batch[tr].z != 0.f || s_v_quats_batch[tr].w != 0.f) {
+                float *v_quat_global_ptr = (float *)(v_quats) + 4 * g;
+                gpuAtomicAdd(v_quat_global_ptr + 0, s_v_quats_batch[tr].x);
+                gpuAtomicAdd(v_quat_global_ptr + 1, s_v_quats_batch[tr].y);
+                gpuAtomicAdd(v_quat_global_ptr + 2, s_v_quats_batch[tr].z);
+                gpuAtomicAdd(v_quat_global_ptr + 3, s_v_quats_batch[tr].w);
+            }
+
+            if (s_v_opacities_batch[tr] != 0.f) {
+                gpuAtomicAdd(v_opacities + g, s_v_opacities_batch[tr]);
             }
         }
-    }
+        // block.sync(); // Sync at start of loop is sufficient
+    } // end loop over b (batches of Gaussians)
 }
 
 template <uint32_t CDIM>
@@ -432,9 +504,21 @@ void launch_rasterize_to_pixels_from_world_3dgs_bwd_kernel(
     dim3 threads = {tile_size, tile_size, 1};
     dim3 grid = {C, tile_height, tile_width};
 
-    int64_t shmem_size =
-        tile_size * tile_size *
-        (sizeof(int32_t) + sizeof(vec4) + sizeof(vec3) + sizeof(vec4) + sizeof(float) * CDIM);
+    // Calculate shared memory size
+    size_t block_elem_count = tile_size * tile_size; // blockDim.x * blockDim.y
+    size_t shmem_size_calc = block_elem_count * (
+        sizeof(int32_t) +           // id_batch
+        sizeof(vec4) +              // xyz_opacity_batch
+        sizeof(vec3) +              // scale_batch
+        sizeof(vec4) +              // quat_batch
+        sizeof(float) * CDIM +      // rgbs_batch (colors)
+        sizeof(float) * CDIM +      // s_v_colors_batch
+        sizeof(vec3) +              // s_v_means_batch
+        sizeof(vec4) +              // s_v_quats_batch
+        sizeof(vec3) +              // s_v_scales_batch
+        sizeof(float)               // s_v_opacities_batch
+    );
+    int64_t shmem_size = static_cast<int64_t>(shmem_size_calc);
 
     if (n_isects == 0) {
         // skip the kernel launch if there are no elements
