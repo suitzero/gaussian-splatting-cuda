@@ -69,6 +69,9 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
     uint32_t i = block.group_index().y * tile_size + block.thread_index().y;
     uint32_t j = block.group_index().z * tile_size + block.thread_index().x;
 
+    const uint32_t kernel_block_size = block.size();
+    uint32_t tr = block.thread_rank();
+
     tile_offsets += cid * tile_height * tile_width;
     render_alphas += cid * image_height * image_width;
     last_ids += cid * image_height * image_width;
@@ -81,28 +84,22 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
         masks += cid * tile_height * tile_width;
     }
 
-    // when the mask is provided, do nothing and return if
-    // this tile is labeled as False
     if (masks != nullptr && !masks[tile_id]) {
         return;
     }
 
     const float px = (float)j + 0.5f;
     const float py = (float)i + 0.5f;
-    // clamp this value to the last pixel
     const int32_t pix_id =
         min(i * image_width + j, image_width * image_height - 1);
 
-    // Create rolling shutter parameter
     auto rs_params = RollingShutterParameters(
         viewmats0 + cid * 16,
         viewmats1 == nullptr ? nullptr : viewmats1 + cid * 16
     );
-    // shift pointers to the current camera. note that glm is colume-major.
     const vec2 focal_length = {Ks[cid * 9 + 0], Ks[cid * 9 + 4]};
     const vec2 principal_point = {Ks[cid * 9 + 2], Ks[cid * 9 + 5]};
     
-    // Create ray from pixel
     WorldRay ray;
     if (camera_model_type == CameraModelType::PINHOLE) {
         if (radial_coeffs == nullptr && tangential_coeffs == nullptr && thin_prism_coeffs == nullptr) {
@@ -143,48 +140,35 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
         OpenCVFisheyeCameraModel camera_model(cm_params);
         ray = camera_model.image_point_to_world_ray_shutter_pose(vec2(px, py), rs_params);
     } else {
-        // should never reach here
         assert(false);
         return;
     }
     const vec3 ray_d = ray.ray_dir;
     const vec3 ray_o = ray.ray_org;
 
-    // keep not rasterizing threads around for reading data
-    bool done = (i < image_height && j < image_width) && ray.valid_flag;
+    bool valid_pixel_for_gaussian_initial = (i < image_height && j < image_width) && ray.valid_flag; // Renamed 'done'
 
-    // have all threads in tile process the same gaussians in batches
-    // first collect gaussians between range.x and range.y in batches
-    // which gaussians to look through in this tile
     int32_t range_start = tile_offsets[tile_id];
     int32_t range_end =
         (cid == C - 1) && (tile_id == tile_width * tile_height - 1)
             ? n_isects
             : tile_offsets[tile_id + 1];
-    const uint32_t block_size = block.size();
     const uint32_t num_batches =
-        (range_end - range_start + block_size - 1) / block_size;
+        (range_end - range_start + kernel_block_size - 1) / kernel_block_size;
 
     extern __shared__ int s[];
-    int32_t *id_batch = (int32_t *)s; // [block_size]
-    vec4 *xyz_opacity_batch =
-        reinterpret_cast<vec4 *>(&id_batch[block_size]); // [block_size]
-    vec3 *scale_batch =
-        reinterpret_cast<vec3 *>(&xyz_opacity_batch[block_size]); // [block_size]
-    vec4 *quat_batch =
-        reinterpret_cast<vec4 *>(&scale_batch[block_size]); // [block_size]
-    float *rgbs_batch =
-        (float *)&quat_batch[block_size]; // [block_size * CDIM]
+    int32_t *id_batch = (int32_t *)s;
+    vec4 *xyz_opacity_batch = reinterpret_cast<vec4 *>(&id_batch[kernel_block_size]);
+    vec3 *scale_batch = reinterpret_cast<vec3 *>(&xyz_opacity_batch[kernel_block_size]);
+    vec4 *quat_batch = reinterpret_cast<vec4 *>(&scale_batch[kernel_block_size]);
+    float *rgbs_batch = (float *)&quat_batch[kernel_block_size];
+    float *s_reduction_buffer = (float *)&rgbs_batch[kernel_block_size * CDIM];
 
-    // this is the T AFTER the last gaussian in this pixel
     float T_final = 1.0f - render_alphas[pix_id];
     float T = T_final;
-    // the contribution from gaussians behind the current one
     float buffer[CDIM] = {0.f};
-    // index of last gaussian to contribute to this pixel
-    const int32_t bin_final = done ? last_ids[pix_id] : 0;
+    const int32_t bin_final = valid_pixel_for_gaussian_initial ? last_ids[pix_id] : 0;
 
-    // df/d_out for this pixel
     float v_render_c[CDIM];
 #pragma unroll
     for (uint32_t k = 0; k < CDIM; ++k) {
@@ -192,124 +176,97 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
     }
     const float v_render_a = v_render_alphas[pix_id];
 
-    // collect and process batches of gaussians
-    // each thread loads one gaussian at a time before rasterizing
-    const uint32_t tr = block.thread_rank();
-    cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
-    const int32_t warp_bin_final =
-        cg::reduce(warp, bin_final, cg::greater<int>());
+    cg::thread_block_tile<min(32u, (unsigned int)kernel_block_size)> warp = cg::tiled_partition<min(32u, (unsigned int)kernel_block_size)>(block);
+    const int32_t warp_bin_final = cg::reduce(warp, bin_final, cg::greater<int>());
+
     for (uint32_t b = 0; b < num_batches; ++b) {
-        // resync all threads before writing next batch of shared mem
         block.sync();
 
-        // each thread fetch 1 gaussian from back to front
-        // 0 index will be furthest back in batch
-        // index of gaussian to load
-        // batch end is the index of the last gaussian in the batch
-        // These values can be negative so must be int32 instead of uint32
-        const int32_t batch_end = range_end - 1 - block_size * b;
-        const int32_t batch_size = min(block_size, batch_end + 1 - range_start);
-        const int32_t idx = batch_end - tr;
-        if (idx >= range_start) {
-            // TODO: only support 1 camera for now so it is ok to abuse the index.
-            int32_t g = flatten_ids[idx]; // flatten index in [C * N] or [nnz]
-            id_batch[tr] = g;
-            const vec3 xyz = means[g];
-            const float opac = opacities[g];
-            xyz_opacity_batch[tr] = {xyz.x, xyz.y, xyz.z, opac};
-            scale_batch[tr] = scales[g];
-            quat_batch[tr] = quats[g];
+        const int32_t batch_end_idx = range_end - 1 - kernel_block_size * b;
+        const int32_t current_batch_size = min(kernel_block_size, batch_end_idx + 1 - range_start);
+        const int32_t load_idx = batch_end_idx - tr;
+
+        if (load_idx >= range_start) {
+            int32_t g_load = flatten_ids[load_idx];
+            id_batch[tr] = g_load;
+            const vec3 xyz_load = means[g_load]; // Renamed xyz to xyz_load to avoid conflict
+            const float opac_load = opacities[g_load]; // Renamed opac to opac_load
+            xyz_opacity_batch[tr] = {xyz_load.x, xyz_load.y, xyz_load.z, opac_load};
+            scale_batch[tr] = scales[g_load];
+            quat_batch[tr] = quats[g_load];
 #pragma unroll
             for (uint32_t k = 0; k < CDIM; ++k) {
-                rgbs_batch[tr * CDIM + k] = colors[g * CDIM + k];
+                rgbs_batch[tr * CDIM + k] = colors[g_load * CDIM + k];
             }
         }
-        // wait for other threads to collect the gaussians in batch
         block.sync();
-        // process gaussians in the current batch for this pixel
-        // 0 index is the furthest back gaussian in the batch
-        for (uint32_t t = max(0, batch_end - warp_bin_final); t < batch_size;
-             ++t) {
-            bool valid = done;
-            if (batch_end - t > bin_final) {
-                valid = 0;
+
+        for (uint32_t t_loop_idx = max(0, batch_end_idx - warp_bin_final); t_loop_idx < current_batch_size; ++t_loop_idx) {
+            int32_t g_shared_idx = t_loop_idx;
+            int32_t g_global_idx = id_batch[g_shared_idx];
+
+            bool valid_pixel_for_gaussian = valid_pixel_for_gaussian_initial; // Start with initial validity
+            if (batch_end_idx - g_shared_idx > bin_final) {
+                valid_pixel_for_gaussian = false;
             }
-            float alpha;
-            float opac;
-            float vis;
 
-            mat3 R, S;
-            vec3 xyz;
-            vec3 scale;
-            vec4 quat;
-            mat3 Mt;
-            vec3 o_minus_mu, gro, grd, grd_n, gcrod;
-            float grayDist, power;
-            if (valid) {
-                const vec4 xyz_opac = xyz_opacity_batch[t];
-                opac = xyz_opac[3];
-                xyz = {xyz_opac[0], xyz_opac[1], xyz_opac[2]};
-                scale = scale_batch[t];
-                quat = quat_batch[t];
+            float alpha_calc = 0.f, opac_sh = 0.f, vis_calc = 0.f; // Renamed alpha, opac, vis
+            mat3 R_calc, S_calc, Mt_calc; // Renamed R, S, Mt
+            vec3 xyz_sh, scale_sh; // Renamed xyz, scale
+            vec4 quat_sh; // Renamed quat
+            vec3 o_minus_mu_calc, gro_calc, grd_calc, grd_n_calc, gcrod_calc; // Renamed variables
+            float grayDist_calc = 0.f, power_calc = 0.f; // Renamed grayDist, power
+
+
+            if (valid_pixel_for_gaussian) {
+                const vec4 xyz_opac_sh = xyz_opacity_batch[g_shared_idx];
+                opac_sh = xyz_opac_sh[3];
+                xyz_sh = {xyz_opac_sh[0], xyz_opac_sh[1], xyz_opac_sh[2]};
+                scale_sh = scale_batch[g_shared_idx];
+                quat_sh = quat_batch[g_shared_idx];
                 
-                R = quat_to_rotmat(quat);
-                S = mat3(
-                    1.0f / scale[0],
-                    0.f,
-                    0.f,
-                    0.f,
-                    1.0f / scale[1],
-                    0.f,
-                    0.f,
-                    0.f,
-                    1.0f / scale[2]
+                R_calc = quat_to_rotmat(quat_sh);
+                S_calc = mat3(
+                    1.0f / scale_sh[0], 0.f, 0.f,
+                    0.f, 1.0f / scale_sh[1], 0.f,
+                    0.f, 0.f, 1.0f / scale_sh[2]
                 );
-                Mt = glm::transpose(R * S);
-                o_minus_mu = ray_o - xyz;
-                gro = Mt * o_minus_mu;
-                grd = Mt * ray_d;
-                grd_n = safe_normalize(grd);
-                gcrod = glm::cross(grd_n, gro);
-                grayDist = glm::dot(gcrod, gcrod);
-                power = -0.5f * grayDist;
+                Mt_calc = glm::transpose(R_calc * S_calc);
+                o_minus_mu_calc = ray_o - xyz_sh;
+                gro_calc = Mt_calc * o_minus_mu_calc;
+                grd_calc = Mt_calc * ray_d;
+                grd_n_calc = safe_normalize(grd_calc);
+                gcrod_calc = glm::cross(grd_n_calc, gro_calc);
+                grayDist_calc = glm::dot(gcrod_calc, gcrod_calc);
+                power_calc = -0.5f * grayDist_calc;
 
-                vis = __expf(power);
-                alpha = min(0.999f, opac * vis);
-                if (power > 0.f || alpha < 1.f / 255.f) {
-                    valid = false;
+                vis_calc = __expf(power_calc);
+                alpha_calc = min(0.999f, opac_sh * vis_calc);
+                if (power_calc > 0.f || alpha_calc < 1.f / 255.f) {
+                    valid_pixel_for_gaussian = false;
                 }
             }
 
-            // if all threads are inactive in this warp, skip this loop
-            if (!warp.any(valid)) {
-                continue;
-            }
-            float v_rgb_local[CDIM] = {0.f};
-            vec3 v_mean_local = {0.f, 0.f, 0.f};
-            vec3 v_scale_local = {0.f, 0.f, 0.f};
-            vec4 v_quat_local = {0.f, 0.f, 0.f, 0.f};
-            float v_opacity_local = 0.f;
-            // initialize everything to 0, only set if the lane is valid
-            if (valid) {
-                // compute the current T for this gaussian
-                float ra = 1.0f / (1.0f - alpha);
+            float local_v_rgb[CDIM]; for(unsigned int k_init=0; k_init<CDIM; ++k_init) local_v_rgb[k_init] = 0.f;
+            vec3 local_v_mean = {0.f, 0.f, 0.f};
+            vec3 local_v_scale = {0.f, 0.f, 0.f};
+            vec4 local_v_quat = {0.f, 0.f, 0.f, 0.f};
+            float local_v_opacity = 0.f;
+
+            if (valid_pixel_for_gaussian) {
+                float ra = 1.0f / (1.0f - alpha_calc);
                 T *= ra;
-                // update v_rgb for this gaussian
-                const float fac = alpha * T;
+                const float fac = alpha_calc * T;
 #pragma unroll
                 for (uint32_t k = 0; k < CDIM; ++k) {
-                    v_rgb_local[k] = fac * v_render_c[k];
+                    local_v_rgb[k] = fac * v_render_c[k];
                 }
-                // contribution from this pixel
                 float v_alpha = 0.f;
 #pragma unroll
                 for (uint32_t k = 0; k < CDIM; ++k) {
-                    v_alpha += (rgbs_batch[t * CDIM + k] * T - buffer[k] * ra) *
-                               v_render_c[k];
+                    v_alpha += (rgbs_batch[g_shared_idx * CDIM + k] * T - buffer[k] * ra) * v_render_c[k];
                 }
-
                 v_alpha += T_final * ra * v_render_a;
-                // contribution from background pixel
                 if (backgrounds != nullptr) {
                     float accum = 0.f;
 #pragma unroll
@@ -319,59 +276,85 @@ __global__ void rasterize_to_pixels_from_world_3dgs_bwd_kernel(
                     v_alpha += -T_final * ra * accum;
                 }
 
-                if (opac * vis <= 0.999f) {
-                    const float v_vis = opac * v_alpha;
-                    float v_gradDist = -0.5f * vis * v_vis;
-                    vec3 v_gcrod = 2.0f * v_gradDist * gcrod;
-                    vec3 v_grd_n = - glm::cross(v_gcrod, gro);
-                    vec3 v_gro = glm::cross(v_gcrod, grd_n);
-                    vec3 v_grd = safe_normalize_bw(grd, v_grd_n);
-                    mat3 v_Mt = glm::outerProduct(v_grd, ray_d) + 
-                        glm::outerProduct(v_gro, o_minus_mu);
-                    vec3 v_o_minus_mu = glm::transpose(Mt) * v_gro;
+                if (opac_sh * vis_calc <= 0.999f) {
+                    const float v_vis_val = opac_sh * v_alpha; // Renamed v_vis
+                    float v_gradDist_val = -0.5f * vis_calc * v_vis_val; // Renamed v_gradDist
+                    vec3 v_gcrod_val = 2.0f * v_gradDist_val * gcrod_calc; // Renamed v_gcrod
+                    vec3 v_grd_n_val = - glm::cross(v_gcrod_val, gro_calc); // Renamed v_grd_n
+                    vec3 v_gro_val = glm::cross(v_gcrod_val, grd_n_calc); // Renamed v_gro
+                    vec3 v_grd_val = safe_normalize_bw(grd_calc, v_grd_n_val); // Renamed v_grd
+                    mat3 v_Mt_val = glm::outerProduct(v_grd_val, ray_d) +
+                        glm::outerProduct(v_gro_val, o_minus_mu_calc); // Renamed v_Mt
+                    vec3 v_o_minus_mu_val = glm::transpose(Mt_calc) * v_gro_val; // Renamed v_o_minus_mu
 
-                    v_mean_local += -v_o_minus_mu;
+                    local_v_mean += -v_o_minus_mu_val;
                     quat_scale_to_preci_half_vjp(
-                        quat, scale, R, glm::transpose(v_Mt), v_quat_local, v_scale_local
+                        quat_sh, scale_sh, R_calc, glm::transpose(v_Mt_val), local_v_quat, local_v_scale
                     );
-                    v_opacity_local = vis * v_alpha;
+                    local_v_opacity = vis_calc * v_alpha;
                 }
-
 #pragma unroll
                 for (uint32_t k = 0; k < CDIM; ++k) {
-                    buffer[k] += rgbs_batch[t * CDIM + k] * fac;
+                    buffer[k] += rgbs_batch[g_shared_idx * CDIM + k] * fac;
                 }
             }
-            warpSum<CDIM>(v_rgb_local, warp);
-            warpSum(v_mean_local, warp);
-            warpSum(v_scale_local, warp);
-            warpSum(v_quat_local, warp);
-            warpSum(v_opacity_local, warp);
-            if (warp.thread_rank() == 0) {
-                int32_t g = id_batch[t]; // flatten index in [C * N] or [nnz]
-                float *v_rgb_ptr = (float *)(v_colors) + CDIM * g;
-#pragma unroll
-                for (uint32_t k = 0; k < CDIM; ++k) {
-                    gpuAtomicAdd(v_rgb_ptr + k, v_rgb_local[k]);
+
+            #define BLOCK_REDUCE_SUM_COMPONENT_WORLD(component_value) \
+                s_reduction_buffer[tr] = (valid_pixel_for_gaussian) ? (component_value) : 0.0f; \
+                block.sync(); \
+                for (unsigned int s_offset = kernel_block_size / 2; s_offset > 0; s_offset >>= 1) { \
+                    if (tr < s_offset) { \
+                        s_reduction_buffer[tr] += s_reduction_buffer[tr + s_offset]; \
+                    } \
+                    block.sync(); \
                 }
 
-                float *v_mean_ptr = (float *)(v_means) + 3 * g;
-                gpuAtomicAdd(v_mean_ptr, v_mean_local.x);
-                gpuAtomicAdd(v_mean_ptr + 1, v_mean_local.y);
-                gpuAtomicAdd(v_mean_ptr + 2, v_mean_local.z);
+            float sum_v_opacity_val;
+            vec3 sum_v_mean_val;
+            vec3 sum_v_scale_val;
+            vec4 sum_v_quat_val;
+            float sum_v_rgb_val[CDIM];
 
-                float *v_scale_ptr = (float *)(v_scales) + 3 * g;
-                gpuAtomicAdd(v_scale_ptr, v_scale_local.x);
-                gpuAtomicAdd(v_scale_ptr + 1, v_scale_local.y);
-                gpuAtomicAdd(v_scale_ptr + 2, v_scale_local.z);
+            BLOCK_REDUCE_SUM_COMPONENT_WORLD(local_v_opacity);
+            if (tr == 0) sum_v_opacity_val = s_reduction_buffer[0];
 
-                float *v_quat_ptr = (float *)(v_quats) + 4 * g;
-                gpuAtomicAdd(v_quat_ptr, v_quat_local.x);
-                gpuAtomicAdd(v_quat_ptr + 1, v_quat_local.y);
-                gpuAtomicAdd(v_quat_ptr + 2, v_quat_local.z);
-                gpuAtomicAdd(v_quat_ptr + 3, v_quat_local.w);
+            BLOCK_REDUCE_SUM_COMPONENT_WORLD(local_v_mean.x); if (tr == 0) sum_v_mean_val.x = s_reduction_buffer[0];
+            BLOCK_REDUCE_SUM_COMPONENT_WORLD(local_v_mean.y); if (tr == 0) sum_v_mean_val.y = s_reduction_buffer[0];
+            BLOCK_REDUCE_SUM_COMPONENT_WORLD(local_v_mean.z); if (tr == 0) sum_v_mean_val.z = s_reduction_buffer[0];
 
-                gpuAtomicAdd(v_opacities + g, v_opacity_local);
+            BLOCK_REDUCE_SUM_COMPONENT_WORLD(local_v_scale.x); if (tr == 0) sum_v_scale_val.x = s_reduction_buffer[0];
+            BLOCK_REDUCE_SUM_COMPONENT_WORLD(local_v_scale.y); if (tr == 0) sum_v_scale_val.y = s_reduction_buffer[0];
+            BLOCK_REDUCE_SUM_COMPONENT_WORLD(local_v_scale.z); if (tr == 0) sum_v_scale_val.z = s_reduction_buffer[0];
+
+            BLOCK_REDUCE_SUM_COMPONENT_WORLD(local_v_quat.x); if (tr == 0) sum_v_quat_val.x = s_reduction_buffer[0];
+            BLOCK_REDUCE_SUM_COMPONENT_WORLD(local_v_quat.y); if (tr == 0) sum_v_quat_val.y = s_reduction_buffer[0];
+            BLOCK_REDUCE_SUM_COMPONENT_WORLD(local_v_quat.z); if (tr == 0) sum_v_quat_val.z = s_reduction_buffer[0];
+            BLOCK_REDUCE_SUM_COMPONENT_WORLD(local_v_quat.w); if (tr == 0) sum_v_quat_val.w = s_reduction_buffer[0];
+
+            for (uint32_t k_reduce = 0; k_reduce < CDIM; ++k_reduce) {
+                BLOCK_REDUCE_SUM_COMPONENT_WORLD(local_v_rgb[k_reduce]);
+                if (tr == 0) sum_v_rgb_val[k_reduce] = s_reduction_buffer[0];
+            }
+
+            if (tr == 0) {
+                if (sum_v_opacity_val != 0.0f) gpuAtomicAdd(v_opacities + g_global_idx, sum_v_opacity_val);
+
+                if (sum_v_mean_val.x != 0.0f) gpuAtomicAdd((scalar_t*)v_means + g_global_idx * 3 + 0, sum_v_mean_val.x);
+                if (sum_v_mean_val.y != 0.0f) gpuAtomicAdd((scalar_t*)v_means + g_global_idx * 3 + 1, sum_v_mean_val.y);
+                if (sum_v_mean_val.z != 0.0f) gpuAtomicAdd((scalar_t*)v_means + g_global_idx * 3 + 2, sum_v_mean_val.z);
+
+                if (sum_v_scale_val.x != 0.0f) gpuAtomicAdd((scalar_t*)v_scales + g_global_idx * 3 + 0, sum_v_scale_val.x);
+                if (sum_v_scale_val.y != 0.0f) gpuAtomicAdd((scalar_t*)v_scales + g_global_idx * 3 + 1, sum_v_scale_val.y);
+                if (sum_v_scale_val.z != 0.0f) gpuAtomicAdd((scalar_t*)v_scales + g_global_idx * 3 + 2, sum_v_scale_val.z);
+
+                if (sum_v_quat_val.x != 0.0f) gpuAtomicAdd((scalar_t*)v_quats + g_global_idx * 4 + 0, sum_v_quat_val.x);
+                if (sum_v_quat_val.y != 0.0f) gpuAtomicAdd((scalar_t*)v_quats + g_global_idx * 4 + 1, sum_v_quat_val.y);
+                if (sum_v_quat_val.z != 0.0f) gpuAtomicAdd((scalar_t*)v_quats + g_global_idx * 4 + 2, sum_v_quat_val.z);
+                if (sum_v_quat_val.w != 0.0f) gpuAtomicAdd((scalar_t*)v_quats + g_global_idx * 4 + 3, sum_v_quat_val.w);
+
+                for (uint32_t k_atomic = 0; k_atomic < CDIM; ++k_atomic) {
+                    if (sum_v_rgb_val[k_atomic] != 0.0f) gpuAtomicAdd((scalar_t *)v_colors + g_global_idx * CDIM + k_atomic, sum_v_rgb_val[k_atomic]);
+                }
             }
         }
     }
@@ -427,14 +410,14 @@ void launch_rasterize_to_pixels_from_world_3dgs_bwd_kernel(
     uint32_t tile_width = tile_offsets.size(2);
     uint32_t n_isects = flatten_ids.size(0);
 
-    // Each block covers a tile on the image. In total there are
-    // C * tile_height * tile_width blocks.
     dim3 threads = {tile_size, tile_size, 1};
     dim3 grid = {C, tile_height, tile_width};
 
+    int64_t kernel_block_size_host = static_cast<int64_t>(tile_size) * tile_size;
     int64_t shmem_size =
-        tile_size * tile_size *
-        (sizeof(int32_t) + sizeof(vec4) + sizeof(vec3) + sizeof(vec4) + sizeof(float) * CDIM);
+        kernel_block_size_host * (sizeof(int32_t) + sizeof(vec4) + sizeof(vec3) + sizeof(vec4) + sizeof(float) * CDIM) +
+        kernel_block_size_host * sizeof(float); // Added space for s_reduction_buffer
+
 
     if (n_isects == 0) {
         // skip the kernel launch if there are no elements
