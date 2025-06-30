@@ -83,6 +83,7 @@ set(HOST_SOURCES
         src/external/tinyply.cpp
         src/bilateral_grid.cpp
         src/selective_adam.cpp
+        src/benchmark_utils.cpp # Added benchmark utils
 )
 
 add_library(gaussian_host STATIC ${HOST_SOURCES})
@@ -116,6 +117,13 @@ target_link_libraries(gaussian_host
 )
 if(UNIX)
     target_link_libraries(gaussian_host PUBLIC dl)
+    # For C++17 filesystem on older GCC, link stdc++fs
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "9.0")
+        target_link_libraries(gaussian_host PRIVATE stdc++fs)
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND NOT APPLE)
+        # For Clang, -lc++fs might be needed if using libc++ and it's not automatically linked
+        # This is often not needed with modern Clang/libc++ setups.
+    endif()
 endif()
 
 # Compilation flags

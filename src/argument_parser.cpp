@@ -58,6 +58,12 @@ namespace {
         ::args::Flag enable_save_eval_images(parser, "save_eval_images", "Save eval images and depth maps", {"save-eval-images"});
         ::args::Flag save_depth(parser, "save_depth", "Save depth maps during training", {"save-depth"});
 
+        // Benchmark mode arguments
+        ::args::ValueFlag<int> benchmark_backward_kernel_iters(parser, "benchmark_backward_kernel_iterations", "Number of iterations for backward kernel benchmark (enables benchmark mode)", {"benchmark_backward_kernel"});
+        ::args::ValueFlag<int> benchmark_warmup_iters(parser, "benchmark_warmup_iterations", "Number of warmup iterations for benchmark", {"benchmark_warmup_iterations"});
+        ::args::ValueFlag<std::string> benchmark_input_snapshot(parser, "benchmark_input_snapshot", "Path to input snapshot directory/files for benchmark", {"benchmark_input_snapshot"});
+        ::args::ValueFlag<std::string> benchmark_kernel_type(parser, "benchmark_kernel_type", "Kernel to benchmark: '2d' or 'world'", {"benchmark_kernel_type"});
+
         // Parse arguments
         try {
             parser.Prog(args.front());
@@ -114,6 +120,7 @@ namespace {
         // Process all optional arguments compactly
         auto& opt = params.optimization;
         auto& ds = params.dataset;
+        auto& bench = params.benchmark;
 
         // Value arguments
         setVal(iterations, opt.iterations);
@@ -140,6 +147,29 @@ namespace {
                 return ERROR_EXIT_CODE;
             }
             opt.render_mode = mode;
+        }
+
+        // Process benchmark arguments
+        if (benchmark_backward_kernel_iters) { // If this is set, benchmark mode is implied
+            bench.enabled = true;
+            bench.backward_kernel_iterations = ::args::get(benchmark_backward_kernel_iters);
+            setVal(benchmark_warmup_iters, bench.warmup_iterations);
+            setVal(benchmark_input_snapshot, bench.input_snapshot_path);
+            setVal(benchmark_kernel_type, bench.kernel_type);
+
+            // Convert path to absolute if it's not empty
+            if (!bench.input_snapshot_path.empty()) {
+                bench.input_snapshot_path = std::filesystem::absolute(bench.input_snapshot_path).string();
+            }
+
+            if (bench.input_snapshot_path.empty() && bench.enabled) {
+                 std::cerr << "ERROR: --benchmark_input_snapshot is required if --benchmark_backward_kernel is set.\n" << parser;
+                 return ERROR_EXIT_CODE;
+            }
+            if (bench.enabled && (bench.kernel_type != "2d" && bench.kernel_type != "world")) {
+                std::cerr << "ERROR: --benchmark_kernel_type must be '2d' or 'world'.\n" << parser;
+                return ERROR_EXIT_CODE;
+            }
         }
 
         return SUCCESS_EXIT_CODE;

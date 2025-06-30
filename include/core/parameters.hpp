@@ -47,6 +47,14 @@ namespace gs {
             bool selective_adam = false; // Use Selective Adam optimizer
         };
 
+        struct BenchmarkParameters {
+            bool enabled = false;
+            int backward_kernel_iterations = 100;
+            int warmup_iterations = 10;
+            std::string input_snapshot_path = "";
+            std::string kernel_type = "2d"; // "2d" or "world"
+        };
+
         struct DatasetConfig {
             std::filesystem::path data_path = "";
             std::filesystem::path output_path = "output";
@@ -58,6 +66,7 @@ namespace gs {
         struct TrainingParameters {
             DatasetConfig dataset;
             OptimizationParameters optimization;
+            BenchmarkParameters benchmark; // Added benchmark parameters
         };
 
         OptimizationParameters read_optim_params_from_json();
