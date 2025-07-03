@@ -1,6 +1,6 @@
 #pragma once
 
-#include "gsplat/Ops.h" // Changed to direct path assuming 'gsplat' is findable from a root include dir
+#include "Ops.h" // Reverted: Assuming gsplat dir is in include path via CMake
 #include "core/camera.hpp"
 #include "core/splat_data.hpp"
 #include <torch/torch.h>
