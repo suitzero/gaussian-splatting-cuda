@@ -278,7 +278,7 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
     const float* means_2d_render_ptr = gs::torch_utils::get_const_data_ptr<float>(render_output.means2d, "render_output.means2d");
     const float* depths_render_ptr = gs::torch_utils::get_const_data_ptr<float>(render_output.depths, "render_output.depths");
     const float* radii_render_ptr = gs::torch_utils::get_const_data_ptr<float>(radii_for_kernel_tensor, "radii_for_kernel_tensor");
-    const bool* visibility_mask_for_model_ptr = gs::torch_utils::get_const_data_ptr<bool>(visibility_mask_for_model, "visibility_mask_for_model");
+    // No longer need visibility_mask_for_model_ptr here, pass the tensor directly
     const float* dL_dc_pixelwise_ptr = gs::torch_utils::get_const_data_ptr<float>(loss_derivs.dL_dc, "loss_derivs.dL_dc");
     const float* d2L_dc2_diag_pixelwise_ptr = gs::torch_utils::get_const_data_ptr<float>(loss_derivs.d2L_dc2_diag, "loss_derivs.d2L_dc2_diag");
     float* H_p_output_packed_ptr = gs::torch_utils::get_data_ptr<float>(H_p_output_packed, "H_p_output_packed");
@@ -301,7 +301,7 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
         depths_render_ptr,
         radii_render_ptr,
         static_cast<int>(render_output.means2d.defined() ? render_output.means2d.size(0) : 0), // P_render
-        visibility_mask_for_model_ptr,
+        visibility_mask_for_model, // Pass the tensor object directly
         dL_dc_pixelwise_ptr,
         d2L_dc2_diag_pixelwise_ptr,
         num_visible_gaussians_in_total_model, // Number of Gaussians to produce output for

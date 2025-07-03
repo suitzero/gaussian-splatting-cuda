@@ -45,7 +45,7 @@ void compute_position_hessian_components_kernel_launcher(
     // visibility_indices_in_render_output (ranks) removed, P_render is the size of above arrays.
     int P_render,
     // Visibility mask for *all* Gaussians in the model [P_total]. True if Gaussian k is visible on screen.
-    const bool* visibility_mask_for_model,
+    const torch::Tensor& visibility_mask_for_model_tensor, // Changed from const bool*
     // Loss derivatives (pixel-wise)
     const float* dL_dc_pixelwise,          // [H, W, C_img]
     const float* d2L_dc2_diag_pixelwise,   // [H, W, C_img]
