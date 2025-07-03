@@ -175,5 +175,38 @@ void batch_solve_1x1_system_kernel_launcher(
     torch::Tensor& out_delta_theta // [N_vis, 1] or [N_vis]
 );
 
+// --- Launchers for Opacity Optimization (Placeholders) ---
+
+// Computes Hessian and gradient components for opacity parameter sigma_k
+// This would compute the parts of H_σ and g_σ derived from color rendering,
+// before barrier terms are added in C++.
+// Note: Paper states ∂²c/∂σ_k² = 0, which simplifies H_σ_base.
+void compute_opacity_hessian_gradient_components_kernel_launcher(
+    // Image dimensions
+    int H_img, int W_img, int C_img,
+    // Model data (means, scales, rotations, opacities, shs, etc. needed for ∂c/∂σ_k)
+    int P_total,
+    const torch::Tensor& means_all,
+    const torch::Tensor& scales_all,
+    const torch::Tensor& rotations_all,
+    const torch::Tensor& opacities_all, // Current opacities (sigmoided)
+    const torch::Tensor& shs_all,
+    int sh_degree,
+    // Camera
+    const torch::Tensor& view_matrix,
+    const torch::Tensor& K_matrix,
+    const torch::Tensor& cam_pos_world,
+    // Render output (e.g., for tile iterators, accumulated alpha up to k-1 for each Gaussian)
+    const gs::RenderOutput& render_output, // And potentially sorted Gaussian indices if used by kernel
+    // Visibility
+    const torch::Tensor& visible_indices, // [N_vis]
+    // Loss derivatives
+    const torch::Tensor& dL_dc_pixelwise,
+    const torch::Tensor& d2L_dc2_diag_pixelwise,
+    // Output arrays (for visible Gaussians)
+    torch::Tensor& out_H_sigma_base, // [N_vis] (scalar base Hessian for opacity)
+    torch::Tensor& out_g_sigma_base  // [N_vis] (scalar base gradient for opacity)
+);
+
 
 } // namespace NewtonKernels
