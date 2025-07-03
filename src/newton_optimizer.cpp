@@ -306,7 +306,8 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
         d2L_dc2_diag_pixelwise_ptr,
         num_visible_gaussians_in_total_model, // Number of Gaussians to produce output for
         H_p_output_packed_ptr,
-        grad_p_output_ptr
+        grad_p_output_ptr,
+        options_.debug_print_shapes // Pass the flag
     );
 
     return {H_p_output_packed, grad_p_output};
@@ -565,6 +566,7 @@ void NewtonOptimizer::step(int iteration,
 
     // === 2. SCALING OPTIMIZATION ===
     if (options_.optimize_scales) {
+        if (options_.debug_print_shapes) std::cout << "[NewtonOpt] Calling compute_scale_updates_newton (Placeholder)..." << std::endl;
         AttributeUpdateOutput scale_update = compute_scale_updates_newton(
             /* model_, */ visible_indices, primary_loss_derivs, primary_camera,
             current_render_output
@@ -576,6 +578,7 @@ void NewtonOptimizer::step(int iteration,
 
     // === 3. ROTATION OPTIMIZATION ===
     if (options_.optimize_rotations) {
+        if (options_.debug_print_shapes) std::cout << "[NewtonOpt] Calling compute_rotation_updates_newton (Placeholder)..." << std::endl;
          AttributeUpdateOutput rot_update = compute_rotation_updates_newton(
             visible_indices, primary_loss_derivs, primary_camera,
             current_render_output
@@ -588,6 +591,7 @@ void NewtonOptimizer::step(int iteration,
 
     // === 4. OPACITY OPTIMIZATION ===
     if (options_.optimize_opacities) {
+        if (options_.debug_print_shapes) std::cout << "[NewtonOpt] Calling compute_opacity_updates_newton (Placeholder)..." << std::endl;
         AttributeUpdateOutput opacity_update = compute_opacity_updates_newton(
             visible_indices, primary_loss_derivs, primary_camera,
             current_render_output
@@ -600,6 +604,7 @@ void NewtonOptimizer::step(int iteration,
 
     // === 5. SH COEFFICIENTS (COLOR) OPTIMIZATION ===
     if (options_.optimize_shs) {
+        if (options_.debug_print_shapes) std::cout << "[NewtonOpt] Calling compute_sh_updates_newton (Placeholder)..." << std::endl;
         AttributeUpdateOutput sh_update = compute_sh_updates_newton(
             visible_indices, primary_loss_derivs, primary_camera,
             current_render_output
@@ -619,7 +624,7 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_scale_updates_ne
     const Camera& camera,
     const gs::RenderOutput& render_output) {
 
-    std::cout << "[NewtonOpt] Placeholder: compute_scale_updates_newton called." << std::endl;
+    if (options_.debug_print_shapes) std::cout << "[NewtonOpt] STUB: compute_scale_updates_newton called." << std::endl;
     // TODO: Implement paper's "Scaling solve"
     // 1. Get current scales: model_.get_scaling().index_select(0, visible_indices)
     // 2. Compute ∂c/∂s_k, ∂²c/∂s_k² (VERY COMPLEX - requires new CUDA kernels & use of supplement)
@@ -642,7 +647,7 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_rotation_updates
     const Camera& camera,
     const gs::RenderOutput& render_output) {
 
-    std::cout << "[NewtonOpt] Placeholder: compute_rotation_updates_newton called." << std::endl;
+    if (options_.debug_print_shapes) std::cout << "[NewtonOpt] STUB: compute_rotation_updates_newton called." << std::endl;
     // TODO: Implement paper's "Rotation solve" (update as Δθ_k around r_k)
     // 1. Get current rotations: model_.get_rotation().index_select(0, visible_indices)
     // 2. Compute ∂c/∂θ_k, ∂²c/∂θ_k²
@@ -663,7 +668,7 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_opacity_updates_
     const Camera& camera,
     const gs::RenderOutput& render_output) {
 
-    std::cout << "[NewtonOpt] Placeholder: compute_opacity_updates_newton called." << std::endl;
+    if (options_.debug_print_shapes) std::cout << "[NewtonOpt] STUB: compute_opacity_updates_newton called." << std::endl;
     // TODO: Implement paper's "Opacity solve" (with log barriers)
     // 1. Get current opacities: model_.get_opacity().index_select(0, visible_indices)
     // 2. Compute ∂c/∂σ_k (paper says ∂²c/∂σ_k² = 0)
@@ -688,7 +693,7 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_sh_updates_newto
     const Camera& camera, // Needed for view direction r_k for SH basis B_k
     const gs::RenderOutput& render_output) {
 
-    std::cout << "[NewtonOpt] Placeholder: compute_sh_updates_newton called." << std::endl;
+    if (options_.debug_print_shapes) std::cout << "[NewtonOpt] STUB: compute_sh_updates_newton called." << std::endl;
     // TODO: Implement paper's "Color solve"
     // 1. Get current SHs: model_.get_shs().index_select(0, visible_indices)
     // 2. Compute ∂c_R/∂c_{k,R} (paper says ∂²c_R/∂c_{k,R}² = 0), per channel.

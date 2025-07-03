@@ -54,7 +54,8 @@ void compute_position_hessian_components_kernel_launcher(
     int num_output_gaussians,
     // Output arrays (dense, for visible Gaussians from model)
     float* H_p_output_packed, // [num_output_gaussians, 6] (symmetric 3x3)
-    float* grad_p_output      // [num_output_gaussians, 3]
+    float* grad_p_output,     // [num_output_gaussians, 3]
+    bool debug_prints_enabled // For conditional printing inside launcher
 );
 
 
