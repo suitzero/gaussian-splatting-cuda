@@ -31,7 +31,6 @@
   "tv_loss_weight": 10.0,
   "steps_scaler": 1,
   "selective_adam": false,
-  "k_nearest_neighbors_for_cameras": 3,
 
   "use_newton_optimizer": false,
   "newton_step_scale": 1.0,

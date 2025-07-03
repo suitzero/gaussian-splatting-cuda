@@ -603,6 +603,30 @@ void NewtonKernels::batch_solve_1x1_system_kernel_launcher(
     CUDA_CHECK(cudaGetLastError());
 }
 
+// --- Kernel for batch 1x1 solve ---
+// Solves (H + damping) * x = -g for x (scalar case)
+__global__ void batch_solve_1x1_system_kernel(
+    int num_systems,
+    const float* H_scalar, // [N] or [N,1]
+    const float* g_scalar, // [N] or [N,1]
+    float damping,
+    float* out_x) {        // [N] or [N,1]
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_systems) return;
+
+    float h_val = H_scalar[idx];
+    float g_val = g_scalar[idx];
+
+    float h_damped = h_val + damping;
+
+    if (abs(h_damped) < 1e-9f) { // Avoid division by zero
+        out_x[idx] = 0.0f; // Or some other fallback, like -g_val / (small_epsilon)
+    } else {
+        out_x[idx] = -g_val / h_damped;
+    }
+}
+
 // --- Definitions for Opacity Optimization Launchers (Stubs) ---
 
 void NewtonKernels::compute_opacity_hessian_gradient_components_kernel_launcher(

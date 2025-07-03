@@ -641,7 +641,7 @@ void NewtonOptimizer::step(int iteration,
         );
         if (scale_update.success && scale_update.delta.defined() && scale_update.delta.numel() > 0) {
             // scale_update.delta is delta_log_s
-            model_.get_raw_scaling().index_add_(0, visible_indices, scale_update.delta);
+            model_.scaling_raw().index_add_(0, visible_indices, scale_update.delta);
         }
     }
 
@@ -654,7 +654,7 @@ void NewtonOptimizer::step(int iteration,
         );
         if (rot_update.success && rot_update.delta.defined() && rot_update.delta.numel() > 0) {
             torch::Tensor q_delta = rot_update.delta; // [N_vis, 4] (w,x,y,z)
-            torch::Tensor q_old_visible = model_.get_raw_rotation().index_select(0, visible_indices).detach(); // [N_vis, 4]
+            torch::Tensor q_old_visible = model_.rotation_raw().index_select(0, visible_indices).detach(); // [N_vis, 4]
 
             // Quaternion multiplication: q_new = q_delta * q_old_visible
             // q_delta = (w_d, x_d, y_d, z_d)
@@ -674,7 +674,7 @@ void NewtonOptimizer::step(int iteration,
             // Normalize the new quaternions
             torch::Tensor q_new_normalized = torch::nn::functional::normalize(q_new_stacked, torch::nn::functional::NormalizeFuncOptions().dim(1).eps(1e-9));
 
-            model_.get_raw_rotation().index_copy_(0, visible_indices, q_new_normalized);
+            model_.rotation_raw().index_copy_(0, visible_indices, q_new_normalized);
         }
     }
 
@@ -687,7 +687,7 @@ void NewtonOptimizer::step(int iteration,
         );
         if (opacity_update.success && opacity_update.delta.defined() && opacity_update.delta.numel() > 0) {
             // opacity_update.delta is delta_for_logits
-            model_.get_raw_opacity().index_add_(0, visible_indices, opacity_update.delta);
+            model_.opacity_raw().index_add_(0, visible_indices, opacity_update.delta);
         }
     }
 
@@ -1009,7 +1009,7 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_opacity_updates_
     // delta_for_logits = new_logit - current_logits
     // current_logits can be obtained by model_.get_raw_opacity().index_select(0, visible_indices)
 
-    torch::Tensor current_logits = model_.get_raw_opacity().index_select(0, visible_indices).detach();
+    torch::Tensor current_logits = model_.opacity_raw().index_select(0, visible_indices).detach();
     torch::Tensor updated_sigma = current_opacities_sigma + delta_sigma;
 
     // Clamp updated_sigma to prevent issues with logit function (input must be in (0,1))
