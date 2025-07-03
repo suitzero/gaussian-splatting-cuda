@@ -56,8 +56,9 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
     torch::Tensor grad_p_output = torch::zeros({num_visible_gaussians_in_total_model, 3}, tensor_opts);
 
     // Prepare camera parameters
-    torch::Tensor view_mat_tensor = camera.world_view_transform().to(dev).to(dtype); // Corrected method
-    torch::Tensor K_matrix = camera.K().to(dev).to(dtype); // Corrected method
+    torch::Tensor view_mat_tensor_orig = camera.world_view_transform().to(dev).to(dtype); // Corrected method
+    torch::Tensor view_mat_tensor = view_mat_tensor_orig.contiguous(); // Ensure contiguity
+    torch::Tensor K_matrix = camera.K().to(dev).to(dtype).contiguous(); // Also ensure K_matrix is contiguous
 
     // Compute camera center C_w = -R_wc^T * t_wc from world_view_transform V = [R_wc | t_wc]
     // V is typically [4,4] or [3,4]. Assuming [4,4] world-to-camera.
@@ -206,7 +207,8 @@ torch::Tensor NewtonOptimizer::compute_projected_position_hessian_and_gradient(
     auto tensor_opts = H_p_packed.options();
     torch::Tensor H_v_packed = torch::zeros({num_visible_gaussians, 3}, tensor_opts); // 3 for symmetric 2x2
 
-    torch::Tensor view_mat_tensor = camera.world_view_transform().to(tensor_opts.device()); // Corrected
+    torch::Tensor view_mat_tensor_orig = camera.world_view_transform().to(tensor_opts.device()); // Corrected
+    torch::Tensor view_mat_tensor = view_mat_tensor_orig.contiguous(); // Ensure contiguity
     // Compute camera center C_w = -R_wc^T * t_wc
     // Corrected slicing:
     torch::Tensor view_mat_2d_proj = view_mat_tensor.select(0, 0); // Get [4,4] matrix assuming batch size is 1
@@ -269,7 +271,8 @@ torch::Tensor NewtonOptimizer::solve_and_project_position_updates(
     );
 
     torch::Tensor delta_p = torch::zeros({num_visible_gaussians, 3}, tensor_opts);
-    torch::Tensor view_mat_tensor = camera.world_view_transform().to(tensor_opts.device()); // Corrected
+    torch::Tensor view_mat_tensor_orig = camera.world_view_transform().to(tensor_opts.device()); // Corrected
+    torch::Tensor view_mat_tensor = view_mat_tensor_orig.contiguous(); // Ensure contiguity
     // Compute camera center C_w = -R_wc^T * t_wc
     // Corrected slicing:
     torch::Tensor view_mat_2d_solve = view_mat_tensor.select(0, 0); // Get [4,4] matrix assuming batch size is 1
