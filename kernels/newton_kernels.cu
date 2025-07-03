@@ -340,7 +340,7 @@ void NewtonKernels::compute_position_hessian_components_kernel_launcher(
     const float* view_matrix, const float* projection_matrix_for_jacobian, const float* cam_pos_world,
     const float* means_2d_render, const float* depths_render, const float* radii_render,
     /* const int* visibility_indices_in_render_output, REMOVED */ int P_render,
-    const bool* visibility_mask_for_model,
+    const torch::Tensor& visibility_mask_for_model_tensor, // Changed from const bool*
     const float* dL_dc_pixelwise, const float* d2L_dc2_diag_pixelwise,
     int num_output_gaussians,
     float* H_p_output_packed, float* grad_p_output
@@ -352,11 +352,18 @@ void NewtonKernels::compute_position_hessian_components_kernel_launcher(
     // For now, the kernel is simplified and assumes P_total is the number of output gaussians if output_index_map is null.
     // This needs to be fixed for a real scenario.
 
-    // Construct the output_index_map (example of how it might be done on CPU and passed)
+    // Construct the output_index_map using a CPU copy of the visibility mask
+    TORCH_CHECK(visibility_mask_for_model_tensor.defined(), "visibility_mask_for_model_tensor is not defined in launcher.");
+    TORCH_CHECK(visibility_mask_for_model_tensor.scalar_type() == torch::kBool, "visibility_mask_for_model_tensor must be Bool type.");
+    TORCH_CHECK(static_cast<int>(visibility_mask_for_model_tensor.size(0)) == P_total, "visibility_mask_for_model_tensor size mismatch with P_total.");
+
+    torch::Tensor visibility_mask_cpu = visibility_mask_for_model_tensor.to(torch::kCPU).contiguous();
+    const bool* cpu_visibility_ptr = visibility_mask_cpu.data_ptr<bool>();
+
     std::vector<int> output_index_map_cpu(P_total);
     int current_out_idx = 0;
     for(int i=0; i<P_total; ++i) {
-        if(visibility_mask_for_model[i]) {
+        if(cpu_visibility_ptr[i]) { // Using CPU pointer
             output_index_map_cpu[i] = current_out_idx++;
         } else {
             output_index_map_cpu[i] = -1;
