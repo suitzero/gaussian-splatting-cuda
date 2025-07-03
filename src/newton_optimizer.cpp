@@ -329,9 +329,11 @@ void NewtonOptimizer::step(int iteration,
     int num_visible_gaussians_in_model = visible_indices.size(0);
 
     if (options_.debug_print_shapes) {
+        torch::Tensor visibility_sum_tensor = visibility_mask_for_model.sum();
+        long visibility_sum = visibility_sum_tensor.defined() ? visibility_sum_tensor.item<int64_t>() : -1L;
         std::cout << "[NewtonOpt] Step - Iteration: " << iteration
                   << ", num_visible_gaussians_in_model (from mask): " << num_visible_gaussians_in_model
-                  << ", visibility_mask_for_model sum: " << visibility_mask_for_model.sum().item<long>()
+                  << ", visibility_mask_for_model sum: " << visibility_sum
                   << std::endl;
     }
 
