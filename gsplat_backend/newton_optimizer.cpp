@@ -1,7 +1,7 @@
 // src/newton_optimizer.cpp
 #include "core/newton_optimizer.hpp" 
-#include "kernels/newton_kernels.cuh" // Path relative to include paths, or needs adjustment
-#include "core/torch_utils.hpp" // Assuming torch_utils is still in core/
+#include "newton_kernels.cuh" // Updated path: newton_kernels.cuh is now in gsplat_backend/include
+#include "core/torch_utils.hpp"
 #include <iostream> // For std::cout debug prints
 
 // Constructor

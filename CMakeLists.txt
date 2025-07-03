@@ -62,6 +62,7 @@ configure_file(
 
 add_subdirectory(external)
 add_subdirectory(gsplat)
+add_subdirectory(gsplat_backend) # Added new backend subdirectory
 
 # =============================================================================
 # HOST LIBRARY - Compiled with g++ (fast!)
@@ -85,7 +86,7 @@ set(HOST_SOURCES
         src/selective_adam.cpp
 	src/knn_utils.cpp    # Added for KNN calculation
         src/setup_utils.cpp  # Added for KNN setup utility
-        src/newton_optimizer.cpp # Added Newton optimizer
+        # src/newton_optimizer.cpp # Moved to gsplat_backend
         src/newton_strategy.cpp # Added Newton strategy
 )
 
@@ -171,7 +172,7 @@ set(KERNEL_SOURCES
         kernels/bilateral_grid_forward.cu
         kernels/bilateral_grid_backward.cu
         kernels/bilateral_grid_tv.cu
-        kernels/newton_kernels.cu # Added Newton optimizer kernels
+        # kernels/newton_kernels.cu # Moved to gsplat_backend
 )
 
 # Add CUDA-OpenGL interop kernels if supported
@@ -406,7 +407,7 @@ endfunction()
 
 configure_build_type(gaussian_host)
 configure_build_type(gaussian_kernels)
-configure_build_type(gsplat_backend)
+configure_build_type(gsplat_backend) # Added for the new library
 if(CUDA_GL_INTEROP_FOUND AND TARGET gaussian_visualizer)
     configure_build_type(gaussian_visualizer)
 endif()

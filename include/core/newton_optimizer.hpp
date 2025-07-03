@@ -5,6 +5,7 @@
 #include "core/camera.hpp" // Included for Camera&
 #include "core/rasterizer.hpp" // Included for RenderOutput
 #include "core/parameters.hpp" // For gs::param::OptimizationParameters
+#include "newton_kernels.cuh"      // Updated path for newton_kernels.cuh
 #include <torch/torch.h>
 #include <vector>
 #include <string> // For std::string in Options

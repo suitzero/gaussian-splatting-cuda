@@ -6,6 +6,13 @@
 #include <torch/torch.h> // For AT_ASSERTM
 #include <cmath> // For fabsf, sqrtf, etc.
 
+// GLM includes
+#define GLM_FORCE_CUDA
+#include <glm/glm.hpp>
+#include <glm/gtc/type_ptr.hpp> // For glm::value_ptr if needed
+#include <glm/gtx/norm.hpp>     // For glm::length2 (squared length)
+
+
 // Basic CUDA utilities (normally in a separate header)
 #define CUDA_CHECK(status) AT_ASSERTM(status == cudaSuccess, cudaGetErrorString(status))
 
@@ -14,62 +21,25 @@ inline int GET_BLOCKS(const int N) {
     return (N + CUDA_NUM_THREADS - 1) / CUDA_NUM_THREADS;
 }
 
-
-// --- CUDA Math Helper Functions ---
-// Using standard CUDA vector types (e.g., ::float3, ::float2 from vector_types.h)
-// and basic operations.
+// --- CudaMath namespace: To be phased out or significantly reduced ---
+// Vector functions are replaced by GLM operators and functions.
+// Matrix functions operating on float* might be kept temporarily if direct GLM matrix types
+// are not immediately propagated everywhere.
 namespace CudaMath {
 
-// Vector operations using ::float3, ::float2
-__device__ __forceinline__ ::float3 add_float3(const ::float3& a, const ::float3& b) {
-    return ::make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
-}
+// The following vector functions are now OBSOLETE and should be replaced by GLM equivalents:
+// add_float3 -> a + b
+// sub_float3 -> a - b
+// mul_float3_scalar -> v * s
+// div_float3_scalar -> v / s (with epsilon check or ensure s != 0)
+// dot_product -> glm::dot(a,b)
+// cross_product -> glm::cross(a,b)
+// length_sq_float3 -> glm::length2(v) or glm::dot(v,v)
+// length_float3 -> glm::length(v)
+// normalize_vec3 -> glm::normalize(v)
+// mul_mat3_vec3 (if M becomes glm::mat3) -> M * v
 
-__device__ __forceinline__ ::float3 sub_float3(const ::float3& a, const ::float3& b) {
-    return ::make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
-}
-
-__device__ __forceinline__ ::float3 mul_float3_scalar(const ::float3& v, float s) {
-    return ::make_float3(v.x * s, v.y * s, v.z * s);
-}
-
-__device__ __forceinline__ ::float3 div_float3_scalar(const ::float3& v, float s) {
-    float inv_s = 1.0f / (s + 1e-8f); // Add epsilon for stability
-    return ::make_float3(v.x * inv_s, v.y * inv_s, v.z * inv_s);
-}
-
-__device__ __forceinline__ float dot_product(const ::float3& a, const ::float3& b) {
-    return a.x * b.x + a.y * b.y + a.z * b.z;
-}
-
-__device__ __forceinline__ ::float3 cross_product(const ::float3& a, const ::float3& b) {
-    return ::make_float3(a.y * b.z - a.z * b.y,
-                         a.z * b.x - a.x * b.z,
-                         a.x * b.y - a.y * b.x);
-}
-
-__device__ __forceinline__ float length_sq_float3(const ::float3& v) {
-    return v.x * v.x + v.y * v.y + v.z * v.z;
-}
-
-__device__ __forceinline__ float length_float3(const ::float3& v) {
-    return sqrtf(length_sq_float3(v));
-}
-
-__device__ __forceinline__ ::float3 normalize_vec3(const ::float3& v) {
-    float l = length_float3(v);
-    return div_float3_scalar(v, l);
-}
-
-// Matrix operations (assuming row-major for M)
-__device__ __forceinline__ ::float3 mul_mat3_vec3(const float* M, const ::float3& v) {
-    ::float3 r;
-    r.x = M[0] * v.x + M[1] * v.y + M[2] * v.z;
-    r.y = M[3] * v.x + M[4] * v.y + M[5] * v.z;
-    r.z = M[6] * v.x + M[7] * v.y + M[8] * v.z;
-    return r;
-}
-
+// Keep matrix operations on raw pointers if still needed during transition
 __device__ __forceinline__ void mat3_transpose_inplace(float* M) {
     float temp;
     temp = M[1]; M[1] = M[3]; M[3] = temp;
@@ -77,39 +47,47 @@ __device__ __forceinline__ void mat3_transpose_inplace(float* M) {
     temp = M[5]; M[5] = M[7]; M[7] = temp;
 }
 
-__device__ __forceinline__ void outer_product_3x3(const ::float3& a, const ::float3& b, float* out_M) {
-    out_M[0] = a.x * b.x; out_M[1] = a.x * b.y; out_M[2] = a.x * b.z;
-    out_M[3] = a.y * b.x; out_M[4] = a.y * b.y; out_M[5] = a.y * b.z;
-    out_M[6] = a.z * b.x; out_M[7] = a.z * b.y; out_M[8] = a.z * b.z;
+// This can be replaced by glm::outerProduct(a,b) if result is glm::mat3
+__device__ __forceinline__ void outer_product_3x3_ptr(const glm::vec3& a, const glm::vec3& b, float* out_M_ptr) {
+    glm::mat3 result_mat = glm::outerProduct(a,b);
+    // GLM matrices are column-major. If out_M_ptr expects row-major:
+    const float* p = glm::value_ptr(result_mat);
+    out_M_ptr[0] = p[0]; out_M_ptr[1] = p[3]; out_M_ptr[2] = p[6]; // col 0
+    out_M_ptr[3] = p[1]; out_M_ptr[4] = p[4]; out_M_ptr[5] = p[7]; // col 1
+    out_M_ptr[6] = p[2]; out_M_ptr[7] = p[5]; out_M_ptr[8] = p[8]; // col 2
+    // If out_M_ptr expects column-major, then simple memcpy or loop.
+    // For now, assuming row-major output for compatibility with original code.
 }
 
-__device__ __forceinline__ void mul_mat4_vec4(const float* PW, const float* p_k_h, float* result) {
+
+__device__ __forceinline__ void mul_mat4_vec4_ptr(const float* PW_ptr, const float* p_k_h_ptr, float* result_ptr) {
+    // This function assumes PW_ptr is row-major.
+    // If to be replaced by GLM: glm::mat4 PW_glm = glm::transpose(glm::make_mat4(PW_ptr)); // if PW_ptr is row-major
+    // glm::vec4 pk_h_glm = glm::make_vec4(p_k_h_ptr);
+    // glm::vec4 result_glm = PW_glm * pk_h_glm;
+    // then store result_glm back to result_ptr.
     for (int i = 0; i < 4; ++i) {
-        result[i] = 0;
+        result_ptr[i] = 0;
         for (int j = 0; j < 4; ++j) {
-            result[i] += PW[i * 4 + j] * p_k_h[j];
+            result_ptr[i] += PW_ptr[i * 4 + j] * p_k_h_ptr[j];
         }
     }
 }
 
-__device__ __forceinline__ void mat_mul_vec(const float* M, const float* v, float* out) {
-    for (int i = 0; i < 3; ++i) {
-        out[i] = 0;
-        for (int j = 0; j < 3; ++j) {
-            out[i] += M[i * 3 + j] * v[j];
-        }
-    }
-}
-
-__device__ __forceinline__ void mat_mul_mat(const float* A, const float* B, float* C,
-                                         int A_rows, int A_cols_B_rows, int B_cols) {
+// A (A_rows x A_cols_B_rows), B (A_cols_B_rows x B_cols), C (A_rows x B_cols)
+// All row-major, raw pointers
+__device__ __forceinline__ void mat_mul_mat_ptr(const float* A_ptr, const float* B_ptr, float* C_ptr,
+                                             int A_rows, int A_cols_B_rows, int B_cols) {
+    // Example: C_glm = glm::make_mat_col_major(A_ptr) * glm::make_mat_col_major(B_ptr) (if A,B are col-major)
+    // Or if A,B row-major: C_glm = glm::transpose(glm::make_mat4(A_ptr)) * glm::transpose(glm::make_mat4(B_ptr))
+    // then store C_glm (transposed if C_ptr needs row-major).
     for (int i = 0; i < A_rows; ++i) {
         for (int j = 0; j < B_cols; ++j) {
             float sum = 0.0f;
             for (int k = 0; k < A_cols_B_rows; ++k) {
-                sum += A[i * A_cols_B_rows + k] * B[k * B_cols + j];
+                sum += A_ptr[i * A_cols_B_rows + k] * B_ptr[k * B_cols + j];
             }
-            C[i * B_cols + j] = sum;
+            C_ptr[i * B_cols + j] = sum;
         }
     }
 }
@@ -120,71 +98,101 @@ __device__ __forceinline__ void mat_mul_mat(const float* A, const float* B, floa
 // --- Projection Derivative Helper Functions ---
 namespace ProjectionDerivs {
 
-__device__ __forceinline__ void compute_h_vec(const ::float3& p_k, const float* PW, float* h_vec4) { // Using ::float3
+__device__ __forceinline__ void compute_h_vec(const glm::vec3& p_k, const float* PW_ptr, float* h_vec4_ptr) { // Changed to glm::vec3, PW is float*
     float p_k_h[4] = {p_k.x, p_k.y, p_k.z, 1.0f};
-    CudaMath::mul_mat4_vec4(PW, p_k_h, h_vec4);
+    CudaMath::mul_mat4_vec4_ptr(PW_ptr, p_k_h, h_vec4_ptr);
 }
 
 __device__ __forceinline__ void compute_projection_jacobian(
-    const float* PW, float W_I_t, float H_I_t,
+    const float* PW_ptr, float W_I_t, float H_I_t, // PW_ptr is float*
     const float* h_vec4, float* jacobian_out_2x3
 ) {
-    float hx = h_vec4[0];
-    float hy = h_vec4[1];
-    float hw = h_vec4[3];
+
+
+// --- Projection Derivative Helper Functions ---
+namespace ProjectionDerivs {
+
+__device__ __forceinline__ void compute_h_vec(const glm::vec3& p_k, const glm::mat4& PW, glm::vec4& h_vec_out) {
+    h_vec_out = PW * glm::vec4(p_k, 1.0f);
+}
+
+// Output jacobian_out_2x3_row_major is float[6] representing a 2x3 row-major matrix
+__device__ __forceinline__ void compute_projection_jacobian(
+    const glm::mat4& PW_col_major, float W_I_t, float H_I_t,
+    const glm::vec4& h_vec, float* jacobian_out_2x3_row_major
+) {
+    float hx = h_vec.x;
+    float hy = h_vec.y;
+    float hw = h_vec.w;
     float inv_hw = 1.0f / (hw + 1e-8f);
+    float inv_hw_sq = inv_hw * inv_hw;
 
     float term_x_coeff = W_I_t / 2.0f;
     float term_y_coeff = H_I_t / 2.0f;
 
-    for (int j = 0; j < 3; ++j) {
-        jacobian_out_2x3[0 * 3 + j] = term_x_coeff * (inv_hw * PW[0 * 4 + j] - (hx * inv_hw * inv_hw) * PW[3 * 4 + j]);
-    }
-    for (int j = 0; j < 3; ++j) {
-        jacobian_out_2x3[1 * 3 + j] = term_y_coeff * (inv_hw * PW[1 * 4 + j] - (hy * inv_hw * inv_hw) * PW[3 * 4 + j]);
-    }
+    // GLM stores matrices in column-major order. PW_col_major[col][row]
+    // The formula (PW)_i refers to the i-th row of the conceptual matrix PW.
+    // So, (PW)_0 = first row of PW = (PW_col_major[0][0], PW_col_major[1][0], PW_col_major[2][0])
+    // (PW)_3 = fourth row of PW = (PW_col_major[0][3], PW_col_major[1][3], PW_col_major[2][3])
+
+    // Row 0 of Jacobian (∂π_x / ∂p_k) (pk_x, pk_y, pk_z)
+    jacobian_out_2x3_row_major[0] = term_x_coeff * (inv_hw * PW_col_major[0][0] - hx * inv_hw_sq * PW_col_major[0][3]); // d(pi_x)/d(pk_x)
+    jacobian_out_2x3_row_major[1] = term_x_coeff * (inv_hw * PW_col_major[1][0] - hx * inv_hw_sq * PW_col_major[1][3]); // d(pi_x)/d(pk_y)
+    jacobian_out_2x3_row_major[2] = term_x_coeff * (inv_hw * PW_col_major[2][0] - hx * inv_hw_sq * PW_col_major[2][3]); // d(pi_x)/d(pk_z)
+
+    // Row 1 of Jacobian (∂π_y / ∂p_k) (pk_x, pk_y, pk_z)
+    jacobian_out_2x3_row_major[3] = term_y_coeff * (inv_hw * PW_col_major[0][1] - hy * inv_hw_sq * PW_col_major[0][3]); // d(pi_y)/d(pk_x)
+    jacobian_out_2x3_row_major[4] = term_y_coeff * (inv_hw * PW_col_major[1][1] - hy * inv_hw_sq * PW_col_major[1][3]); // d(pi_y)/d(pk_y)
+    jacobian_out_2x3_row_major[5] = term_y_coeff * (inv_hw * PW_col_major[2][1] - hy * inv_hw_sq * PW_col_major[2][3]); // d(pi_y)/d(pk_z)
 }
 
 __device__ __forceinline__ void compute_projection_hessian(
-    const float* PW, float W_I_t, float H_I_t,
-    const float* h_vec4,
-    float* hessian_out_pi_x_3x3, float* hessian_out_pi_y_3x3
+    const glm::mat4& PW_col_major, float W_I_t, float H_I_t,
+    const glm::vec4& h_vec,
+    float* hessian_out_pi_x_3x3_row_major,
+    float* hessian_out_pi_y_3x3_row_major
 ) {
-    float hx = h_vec4[0];
-    float hy = h_vec4[1];
-    float hw = h_vec4[3];
+    float hx = h_vec.x;
+    float hy = h_vec.y;
+    float hw = h_vec.w;
     float inv_hw_sq = 1.0f / (hw * hw + 1e-8f);
+    float hw_cubed = hw * hw * hw + 1e-9f; // Avoid division by zero
 
-    ::float3 PW0_vec = ::make_float3(PW[0], PW[1], PW[2]);
-    ::float3 PW1_vec = ::make_float3(PW[4], PW[5], PW[6]);
-    ::float3 PW3_vec = ::make_float3(PW[12], PW[13], PW[14]);
+    // (PW)_i notation from paper means i-th row of the matrix PW.
+    // Since PW_col_major is column-major (GLM default), PW_col_major[c][r]:
+    // (PW)_0 (row 0) = glm::vec3(PW_col_major[0][0], PW_col_major[1][0], PW_col_major[2][0])
+    // (PW)_1 (row 1) = glm::vec3(PW_col_major[0][1], PW_col_major[1][1], PW_col_major[2][1])
+    // (PW)_3 (row 3, xyz part) = glm::vec3(PW_col_major[0][3], PW_col_major[1][3], PW_col_major[2][3])
+    glm::vec3 PWr0 = glm::vec3(PW_col_major[0][0], PW_col_major[1][0], PW_col_major[2][0]);
+    glm::vec3 PWr1 = glm::vec3(PW_col_major[0][1], PW_col_major[1][1], PW_col_major[2][1]);
+    glm::vec3 PWr3 = glm::vec3(PW_col_major[0][3], PW_col_major[1][3], PW_col_major[2][3]);
 
-    float PW3_outer_PW3[9];
-    CudaMath::outer_product_3x3(PW3_vec, PW3_vec, PW3_outer_PW3);
-    float PW3_outer_PW0[9];
-    CudaMath::outer_product_3x3(PW3_vec, PW0_vec, PW3_outer_PW0);
-    float PW3_outer_PW1[9];
-    CudaMath::outer_product_3x3(PW3_vec, PW1_vec, PW3_outer_PW1);
+    glm::mat3 PW3_outer_PW3 = glm::outerProduct(PWr3, PWr3);
+    glm::mat3 PW3_outer_PW0 = glm::outerProduct(PWr3, PWr0);
+    glm::mat3 PW0_outer_PW3 = glm::transpose(PW3_outer_PW0); // ( (PW_3)^T (PW_0) )^T  is (PW_0)^T (PW_3)
+    glm::mat3 PW3_outer_PW1 = glm::outerProduct(PWr3, PWr1);
+    glm::mat3 PW1_outer_PW3 = glm::transpose(PW3_outer_PW1);
 
-    float factor_x1 = W_I_t * (2.0f * hx / (hw*hw*hw + 1e-9f));
+
+    float factor_x1 = W_I_t * (2.0f * hx / hw_cubed);
     float factor_x2 = W_I_t * (-1.0f * inv_hw_sq);
-    for (int i = 0; i < 9; ++i) {
-        float term1_x = factor_x1 * PW3_outer_PW3[i];
-        int row = i / 3;
-        int col = i % 3;
-        float term2_x = factor_x2 * (PW3_outer_PW0[i] + PW3_outer_PW0[col * 3 + row]);
-        hessian_out_pi_x_3x3[i] = term1_x + term2_x;
-    }
 
-    float factor_y1 = H_I_t * (2.0f * hy / (hw*hw*hw + 1e-9f));
+    glm::mat3 H_pi_x_col_major = factor_x1 * PW3_outer_PW3 + factor_x2 * (PW3_outer_PW0 + PW0_outer_PW3);
+
+    // Store GLM column-major mat3 to row-major float array
+    const float* p_x = glm::value_ptr(H_pi_x_col_major);
+    hessian_out_pi_x_3x3_row_major[0] = p_x[0]; hessian_out_pi_x_3x3_row_major[1] = p_x[3]; hessian_out_pi_x_3x3_row_major[2] = p_x[6];
+    hessian_out_pi_x_3x3_row_major[3] = p_x[1]; hessian_out_pi_x_3x3_row_major[4] = p_x[4]; hessian_out_pi_x_3x3_row_major[5] = p_x[7];
+    hessian_out_pi_x_3x3_row_major[6] = p_x[2]; hessian_out_pi_x_3x3_row_major[7] = p_x[5]; hessian_out_pi_x_3x3_row_major[8] = p_x[8];
+
+    float factor_y1 = H_I_t * (2.0f * hy / hw_cubed);
     float factor_y2 = H_I_t * (-1.0f * inv_hw_sq);
-    for (int i = 0; i < 9; ++i) {
-        float term1_y = factor_y1 * PW3_outer_PW3[i];
-        int row = i / 3;
-        int col = i % 3;
-        float term2_y = factor_y2 * (PW3_outer_PW1[i] + PW3_outer_PW1[col * 3 + row]);
-        hessian_out_pi_y_3x3[i] = term1_y + term2_y;
-    }
+
+    glm::mat3 H_pi_y_col_major = factor_y1 * PW3_outer_PW3 + factor_y2 * (PW3_outer_PW1 + PW1_outer_PW3);
+    const float* p_y = glm::value_ptr(H_pi_y_col_major);
+    hessian_out_pi_y_3x3_row_major[0] = p_y[0]; hessian_out_pi_y_3x3_row_major[1] = p_y[3]; hessian_out_pi_y_3x3_row_major[2] = p_y[6];
+    hessian_out_pi_y_3x3_row_major[3] = p_y[1]; hessian_out_pi_y_3x3_row_major[4] = p_y[4]; hessian_out_pi_y_3x3_row_major[5] = p_y[7];
+    hessian_out_pi_y_3x3_row_major[6] = p_y[2]; hessian_out_pi_y_3x3_row_major[7] = p_y[5]; hessian_out_pi_y_3x3_row_major[8] = p_y[8];
 }
 } // namespace ProjectionDerivs
 
@@ -192,7 +200,7 @@ __device__ __forceinline__ void compute_projection_hessian(
 namespace SHDerivs {
 
 __device__ __forceinline__ void eval_sh_basis_up_to_degree3(
-    int degree, const ::float3& r_k_normalized, float* basis_out // Using ::float3
+    int degree, const glm::vec3& r_k_normalized, float* basis_out // Using glm::vec3
 ) {
     float x = r_k_normalized.x;
     float y = r_k_normalized.y;
@@ -223,29 +231,26 @@ __device__ __forceinline__ void eval_sh_basis_up_to_degree3(
     basis_out[15] = -0.5900435899266435f * fC2;
 }
 
+// drk_dpk_out_3x3 is still float* for now, but represents a 3x3 matrix.
+// It could be changed to output glm::mat3, and the caller would use glm::value_ptr if needed.
 __device__ __forceinline__ void compute_drk_dpk(
-    const ::float3& r_k_normalized, float r_k_norm, float* drk_dpk_out_3x3 // Using ::float3
+    const glm::vec3& r_k_normalized, float r_k_norm,
+    float* drk_dpk_out_3x3_row_major // Output as row-major float[9]
 ) {
     float inv_r_k_norm = 1.0f / (r_k_norm + 1e-8f);
-    drk_dpk_out_3x3[0] = 1.0f; drk_dpk_out_3x3[1] = 0.0f; drk_dpk_out_3x3[2] = 0.0f;
-    drk_dpk_out_3x3[3] = 0.0f; drk_dpk_out_3x3[4] = 1.0f; drk_dpk_out_3x3[5] = 0.0f;
-    drk_dpk_out_3x3[6] = 0.0f; drk_dpk_out_3x3[7] = 0.0f; drk_dpk_out_3x3[8] = 1.0f;
-    drk_dpk_out_3x3[0] -= r_k_normalized.x * r_k_normalized.x;
-    drk_dpk_out_3x3[1] -= r_k_normalized.x * r_k_normalized.y;
-    drk_dpk_out_3x3[2] -= r_k_normalized.x * r_k_normalized.z;
-    drk_dpk_out_3x3[3] -= r_k_normalized.y * r_k_normalized.x;
-    drk_dpk_out_3x3[4] -= r_k_normalized.y * r_k_normalized.y;
-    drk_dpk_out_3x3[5] -= r_k_normalized.y * r_k_normalized.z;
-    drk_dpk_out_3x3[6] -= r_k_normalized.z * r_k_normalized.x;
-    drk_dpk_out_3x3[7] -= r_k_normalized.z * r_k_normalized.y;
-    drk_dpk_out_3x3[8] -= r_k_normalized.z * r_k_normalized.z;
-    for (int i = 0; i < 9; ++i) {
-        drk_dpk_out_3x3[i] *= inv_r_k_norm;
-    }
+    glm::mat3 I_minus_rktrk = glm::mat3(1.0f) - glm::outerProduct(r_k_normalized, r_k_normalized);
+    glm::mat3 result_col_major = inv_r_k_norm * I_minus_rktrk;
+
+    // Store GLM column-major mat3 to row-major float array
+    const float* p = glm::value_ptr(result_col_major);
+    drk_dpk_out_3x3_row_major[0] = p[0]; drk_dpk_out_3x3_row_major[1] = p[3]; drk_dpk_out_3x3_row_major[2] = p[6];
+    drk_dpk_out_3x3_row_major[3] = p[1]; drk_dpk_out_3x3_row_major[4] = p[4]; drk_dpk_out_3x3_row_major[5] = p[7];
+    drk_dpk_out_3x3_row_major[6] = p[2]; drk_dpk_out_3x3_row_major[7] = p[5]; drk_dpk_out_3x3_row_major[8] = p[8];
 }
 
+// dPhi_drk_out is still float* (num_coeffs * 3), row-major (dPhi0/drx, dPhi0/dry, dPhi0/drz, dPhi1/drx, ...)
 __device__ __forceinline__ void compute_dphi_drk_up_to_degree3(
-    int degree, const ::float3& r_k_normalized, float* dPhi_drk_out // Using ::float3
+    int degree, const glm::vec3& r_k_normalized, float* dPhi_drk_out // Using glm::vec3
 ) {
     float x = r_k_normalized.x; float y = r_k_normalized.y; float z = r_k_normalized.z;
     float x2 = x*x; float y2 = y*y; float z2 = z*z;
@@ -294,19 +299,36 @@ __device__ __forceinline__ void compute_dphi_drk_up_to_degree3(
     dPhi_drk_out[15*3 + 2] = 0.0f;
 }
 
+// Output jac_out_3 is float* but will store components of a glm::vec3
 __device__ __forceinline__ void compute_sh_color_jacobian_single_channel(
     const float* sh_coeffs_single_channel, const float* sh_basis_values,
-    const float* dPhi_drk, const float* drk_dpk,
-    int num_basis_coeffs, float* jac_out_3
+    const float* dPhi_drk_ptr, // (num_coeffs x 3) matrix
+    const float* drk_dpk_ptr,  // (3x3) matrix
+    int num_basis_coeffs,
+    float* jac_out_3_ptr
 ) {
-    float M_prod[16*3];
-    CudaMath::mat_mul_mat(dPhi_drk, drk_dpk, M_prod, num_basis_coeffs, 3, 3);
-    jac_out_3[0] = 0.0f; jac_out_3[1] = 0.0f; jac_out_3[2] = 0.0f;
+    // Convert drk_dpk_ptr (row-major 3x3) to glm::mat3 (column-major)
+    glm::mat3 drk_dpk_mat = glm::transpose(glm::make_mat3(drk_dpk_ptr));
+
+    // M_prod = dPhi_drk * drk_dpk_mat ( (num_coeffs x 3) * (3x3) = (num_coeffs x 3) )
+    // dPhi_drk is row-major: [dPhi0/drx, dPhi0/dry, dPhi0/drz, dPhi1/drx, ...]
+    // M_prod_ij = sum_l (dPhi_drk_il * drk_dpk_mat_lj)
+    float M_prod_row_major[16*3]; // Max ( (3+1)^2 * 3 )
+
+    for(int i=0; i < num_basis_coeffs; ++i) { // M_prod row index
+        glm::vec3 dPhi_drk_row_i = glm::vec3(dPhi_drk_ptr[i*3+0], dPhi_drk_ptr[i*3+1], dPhi_drk_ptr[i*3+2]);
+        glm::vec3 result_row = dPhi_drk_row_i * drk_dpk_mat; // Vector * matrix (row vector semantic)
+        M_prod_row_major[i*3+0] = result_row.x;
+        M_prod_row_major[i*3+1] = result_row.y;
+        M_prod_row_major[i*3+2] = result_row.z;
+    }
+
+    jac_out_3_ptr[0] = 0.0f; jac_out_3_ptr[1] = 0.0f; jac_out_3_ptr[2] = 0.0f;
     for (int i = 0; i < num_basis_coeffs; ++i) {
         float v_i = sh_basis_values[i] * sh_coeffs_single_channel[i];
-        jac_out_3[0] += v_i * M_prod[i * 3 + 0];
-        jac_out_3[1] += v_i * M_prod[i * 3 + 1];
-        jac_out_3[2] += v_i * M_prod[i * 3 + 2];
+        jac_out_3_ptr[0] += v_i * M_prod_row_major[i * 3 + 0];
+        jac_out_3_ptr[1] += v_i * M_prod_row_major[i * 3 + 1];
+        jac_out_3_ptr[2] += v_i * M_prod_row_major[i * 3 + 2];
     }
 }
 } // namespace SHDerivs
@@ -314,7 +336,7 @@ __device__ __forceinline__ void compute_sh_color_jacobian_single_channel(
 // --- KERNEL DEFINITIONS ---
 
 __device__ __forceinline__ void get_projected_cov2d_and_derivs_placeholder(
-    const ::float3& p_k_world, // Using ::float3
+    const glm::vec3& p_k_world, // Using glm::vec3
     const float* scales_k, const float* rotations_k,
     const float* view_matrix, const float* proj_matrix,
     const float* jacobian_d_pi_d_pk,
@@ -362,9 +384,9 @@ __global__ void compute_position_hessian_components_kernel(
     const float* shs_all,
     int sh_degree,
     int sh_coeffs_per_color_channel,
-    const float* view_matrix,
-    const float* projection_matrix_for_jacobian,
-    const float* cam_pos_world,
+    const float* view_matrix_ptr,        // Changed to _ptr to indicate it's a raw pointer
+    const float* perspective_proj_matrix_ptr, // Changed from projection_matrix_for_jacobian
+    const float* cam_pos_world_ptr,      // Changed to _ptr
     const bool* visibility_mask_for_model,
     const float* dL_dc_pixelwise,
     const float* d2L_dc2_diag_pixelwise,
@@ -382,7 +404,7 @@ __global__ void compute_position_hessian_components_kernel(
     int output_idx = output_index_map[p_idx_total];
     if (output_idx < 0 || output_idx >= num_output_gaussians) return;
 
-    ::float3 pk_vec3 = ::make_float3(
+    glm::vec3 pk_vec3 = glm::vec3(
         means_3d_all[p_idx_total * 3 + 0],
         means_3d_all[p_idx_total * 3 + 1],
         means_3d_all[p_idx_total * 3 + 2]);
@@ -392,35 +414,40 @@ __global__ void compute_position_hessian_components_kernel(
     float opacity_k = opacities_all[p_idx_total];
     const float* sh_coeffs_k_all_channels = shs_all + p_idx_total * sh_coeffs_per_color_channel * 3;
 
-    ::float3 cam_pos_world_vec3 = ::make_float3(cam_pos_world[0], cam_pos_world[1], cam_pos_world[2]);
+    glm::vec3 cam_pos_world_vec3 = glm::vec3(cam_pos_world_ptr[0], cam_pos_world_ptr[1], cam_pos_world_ptr[2]);
 
-    ::float3 view_dir_to_pk_unnormalized = CudaMath::sub_float3(pk_vec3, cam_pos_world_vec3);
-    float r_k_norm = CudaMath::length_float3(view_dir_to_pk_unnormalized);
-    ::float3 r_k_normalized = CudaMath::div_float3_scalar(view_dir_to_pk_unnormalized, r_k_norm);
+    glm::vec3 view_dir_to_pk_unnormalized = pk_vec3 - cam_pos_world_vec3;
+    float r_k_norm = glm::length(view_dir_to_pk_unnormalized);
+    glm::vec3 r_k_normalized = glm::normalize(view_dir_to_pk_unnormalized);
 
-    float proj_view_matrix[16];
-    CudaMath::mat_mul_mat(projection_matrix_for_jacobian, view_matrix, proj_view_matrix, 4, 4, 4);
+    // Load raw pointers into GLM matrices. Assume row-major storage for input pointers.
+    // GLM matrices are column-major. glm::make_mat4 assumes column-major input from pointer.
+    // So, if input is row-major, we need to transpose after loading or load manually.
+    glm::mat4 V_col_major = glm::transpose(glm::make_mat4(view_matrix_ptr));
+    glm::mat4 P_col_major = glm::transpose(glm::make_mat4(perspective_proj_matrix_ptr));
+    glm::mat4 PW_col_major = P_col_major * V_col_major;
 
-    float h_vec4_data[4];
-    ProjectionDerivs::compute_h_vec(pk_vec3, proj_view_matrix, h_vec4_data);
+    glm::vec4 h_vec4_data; // Changed from float h_vec4_data[4]
+    ProjectionDerivs::compute_h_vec(pk_vec3, PW_col_major, h_vec4_data); // Pass glm::mat4
 
-    float d_pi_d_pk_data[2*3];
-    ProjectionDerivs::compute_projection_jacobian(proj_view_matrix, (float)W_img, (float)H_img, h_vec4_data, d_pi_d_pk_data);
+    float d_pi_d_pk_data_row_major[6];
+    ProjectionDerivs::compute_projection_jacobian(PW_col_major, (float)W_img, (float)H_img, h_vec4_data, d_pi_d_pk_data_row_major);
 
-    float d2_pi_d_pk2_x_data[3*3];
-    float d2_pi_d_pk2_y_data[3*3];
-    ProjectionDerivs::compute_projection_hessian(proj_view_matrix, (float)W_img, (float)H_img, h_vec4_data, d2_pi_d_pk2_x_data, d2_pi_d_pk2_y_data);
+    float d2_pi_d_pk2_x_data_row_major[9];
+    float d2_pi_d_pk2_y_data_row_major[9];
+    ProjectionDerivs::compute_projection_hessian(PW_col_major, (float)W_img, (float)H_img, h_vec4_data,
+                                                 d2_pi_d_pk2_x_data_row_major, d2_pi_d_pk2_y_data_row_major);
 
     float sh_basis_eval_data[16];
     SHDerivs::eval_sh_basis_up_to_degree3(sh_degree, r_k_normalized, sh_basis_eval_data);
 
-    float d_rk_d_pk_data[3*3];
-    SHDerivs::compute_drk_dpk(r_k_normalized, r_k_norm, d_rk_d_pk_data);
+    float d_rk_d_pk_data_row_major[9];
+    SHDerivs::compute_drk_dpk(r_k_normalized, r_k_norm, d_rk_d_pk_data_row_major);
 
-    float d_phi_d_rk_data[16*3];
-    SHDerivs::compute_dphi_drk_up_to_degree3(sh_degree, r_k_normalized, d_phi_d_rk_data);
+    float d_phi_d_rk_data_row_major[16*3];
+    SHDerivs::compute_dphi_drk_up_to_degree3(sh_degree, r_k_normalized, d_phi_d_rk_data_row_major);
 
-    ::float3 d_c_bar_R_d_pk_val, d_c_bar_G_d_pk_val, d_c_bar_B_d_pk_val;
+    glm::vec3 d_c_bar_R_d_pk_val, d_c_bar_G_d_pk_val, d_c_bar_B_d_pk_val;
     float sh_coeffs_k_R[16], sh_coeffs_k_G[16], sh_coeffs_k_B[16];
     for(int i=0; i<sh_coeffs_per_color_channel; ++i) {
         sh_coeffs_k_R[i] = sh_coeffs_k_all_channels[i*3 + 0];
@@ -428,11 +455,11 @@ __global__ void compute_position_hessian_components_kernel(
         sh_coeffs_k_B[i] = sh_coeffs_k_all_channels[i*3 + 2];
     }
 
-    SHDerivs::compute_sh_color_jacobian_single_channel(sh_coeffs_k_R, sh_basis_eval_data, d_phi_d_rk_data, d_rk_d_pk_data, sh_coeffs_per_color_channel, &d_c_bar_R_d_pk_val.x);
-    SHDerivs::compute_sh_color_jacobian_single_channel(sh_coeffs_k_G, sh_basis_eval_data, d_phi_d_rk_data, d_rk_d_pk_data, sh_coeffs_per_color_channel, &d_c_bar_G_d_pk_val.x);
-    SHDerivs::compute_sh_color_jacobian_single_channel(sh_coeffs_k_B, sh_basis_eval_data, d_phi_d_rk_data, d_rk_d_pk_data, sh_coeffs_per_color_channel, &d_c_bar_B_d_pk_val.x);
+    SHDerivs::compute_sh_color_jacobian_single_channel(sh_coeffs_k_R, sh_basis_eval_data, d_phi_d_rk_data_row_major, d_rk_d_pk_data_row_major, sh_coeffs_per_color_channel, glm::value_ptr(d_c_bar_R_d_pk_val));
+    SHDerivs::compute_sh_color_jacobian_single_channel(sh_coeffs_k_G, sh_basis_eval_data, d_phi_d_rk_data_row_major, d_rk_d_pk_data_row_major, sh_coeffs_per_color_channel, glm::value_ptr(d_c_bar_G_d_pk_val));
+    SHDerivs::compute_sh_color_jacobian_single_channel(sh_coeffs_k_B, sh_basis_eval_data, d_phi_d_rk_data_row_major, d_rk_d_pk_data_row_major, sh_coeffs_per_color_channel, glm::value_ptr(d_c_bar_B_d_pk_val));
 
-    ::float3 g_p_k_accum_val = ::make_float3(0.f, 0.f, 0.f);
+    glm::vec3 g_p_k_accum_val = glm::vec3(0.f, 0.f, 0.f);
     float H_p_k_accum_symm[6] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
 
     for (int r = 0; r < H_img; ++r) {
@@ -440,18 +467,25 @@ __global__ void compute_position_hessian_components_kernel(
             float pixel_ndc_x = (2.0f * (c + 0.5f) / W_img - 1.0f);
             float pixel_ndc_y = (2.0f * (r + 0.5f) / H_img - 1.0f);
 
-            float pi_k_ndc_x_unscaled = h_vec4_data[0] / (h_vec4_data[3] + 1e-7f);
-            float pi_k_ndc_y_unscaled = h_vec4_data[1] / (h_vec4_data[3] + 1e-7f);
+            // pi_k is the projected center of the Gaussian pk_vec3
+            // h_vec4_data = P_col_major * V_col_major * pk_world_homo
+            // pi_k_ndc_x_unscaled = h_vec4_data.x / h_vec4_data.w (already in NDC if P_col_major is to NDC)
+            float pi_k_ndc_x_unscaled = h_vec4_data.x / (h_vec4_data.w + 1e-7f);
+            float pi_k_ndc_y_unscaled = h_vec4_data.y / (h_vec4_data.w + 1e-7f);
 
-            ::float2 diff_ndc_val = ::make_float2(pi_k_ndc_x_unscaled - pixel_ndc_x, pi_k_ndc_y_unscaled - pixel_ndc_y);
+            glm::vec2 diff_ndc_val = glm::vec2(pi_k_ndc_x_unscaled - pixel_ndc_x, pi_k_ndc_y_unscaled - pixel_ndc_y);
 
             float cov2d_sym_data[3], inv_cov2d_sym_data[3], det_cov2d_data;
             float d_Gk_d_pik_data[2];
             float d2_Gk_d_pik2_data[3];
 
+            // get_projected_cov2d_and_derivs_placeholder expects float* for view and proj matrices
+            // but we have glm::mat4 V_col_major and P_col_major (and PW_col_major)
+            // For now, pass the original pointers, assuming the placeholder can handle them or is adapted.
+            // The d_pi_d_pk_data_row_major is float[6]
             get_projected_cov2d_and_derivs_placeholder(pk_vec3, scales_k, rotations_k,
-                                                       view_matrix, projection_matrix_for_jacobian,
-                                                       d_pi_d_pk_data, (float)W_img, (float)H_img,
+                                                       view_matrix_ptr, perspective_proj_matrix_ptr,
+                                                       d_pi_d_pk_data_row_major, (float)W_img, (float)H_img,
                                                        cov2d_sym_data, inv_cov2d_sym_data, &det_cov2d_data,
                                                        nullptr, nullptr);
 
@@ -462,7 +496,7 @@ __global__ void compute_position_hessian_components_kernel(
 
             if (G_k_pixel < 1e-4f) continue;
 
-            ::float2 sigma_inv_diff_val;
+            glm::vec2 sigma_inv_diff_val;
             sigma_inv_diff_val.x = inv_cov2d_sym_data[0]*diff_ndc_val.x + inv_cov2d_sym_data[1]*diff_ndc_val.y;
             sigma_inv_diff_val.y = inv_cov2d_sym_data[1]*diff_ndc_val.x + inv_cov2d_sym_data[2]*diff_ndc_val.y;
             d_Gk_d_pik_data[0] = -G_k_pixel * sigma_inv_diff_val.x;
@@ -475,27 +509,31 @@ __global__ void compute_position_hessian_components_kernel(
 
             float alpha_k_pixel = opacity_k * G_k_pixel;
 
-            ::float3 c_bar_k_rgb_val;
+            glm::vec3 c_bar_k_rgb_val;
             c_bar_k_rgb_val.x =0; for(int i=0; i<sh_coeffs_per_color_channel; ++i) c_bar_k_rgb_val.x += sh_coeffs_k_R[i] * sh_basis_eval_data[i];
             c_bar_k_rgb_val.y =0; for(int i=0; i<sh_coeffs_per_color_channel; ++i) c_bar_k_rgb_val.y += sh_coeffs_k_G[i] * sh_basis_eval_data[i];
             c_bar_k_rgb_val.z =0; for(int i=0; i<sh_coeffs_per_color_channel; ++i) c_bar_k_rgb_val.z += sh_coeffs_k_B[i] * sh_basis_eval_data[i];
 
 
-            ::float3 d_c_final_d_Gk_val = CudaMath::mul_float3_scalar(c_bar_k_rgb_val, opacity_k);
+            glm::vec3 d_c_final_d_Gk_val = c_bar_k_rgb_val * opacity_k;
 
-            ::float3 d_Gk_d_pk_chain_val;
-            d_Gk_d_pk_chain_val.x = d_Gk_d_pik_data[0] * d_pi_d_pk_data[0*3+0] + d_Gk_d_pik_data[1] * d_pi_d_pk_data[1*3+0];
-            d_Gk_d_pk_chain_val.y = d_Gk_d_pik_data[0] * d_pi_d_pk_data[0*3+1] + d_Gk_d_pik_data[1] * d_pi_d_pk_data[1*3+1];
-            d_Gk_d_pk_chain_val.z = d_Gk_d_pik_data[0] * d_pi_d_pk_data[0*3+2] + d_Gk_d_pik_data[1] * d_pi_d_pk_data[1*3+2];
+            glm::vec3 d_Gk_d_pk_chain_val;
+            // d_pi_d_pk_data_row_major is 2x3 row-major: [J11 J12 J13 J21 J22 J23]
+            // d_Gk_d_pik_data is [dG/dπx, dG/dπy] (1x2)
+            // d_Gk_d_pk_chain = d_Gk_d_pik * d_pi_d_pk
+            d_Gk_d_pk_chain_val.x = d_Gk_d_pik_data[0] * d_pi_d_pk_data_row_major[0] + d_Gk_d_pik_data[1] * d_pi_d_pk_data_row_major[3]; // col 0 of J_c_pk
+            d_Gk_d_pk_chain_val.y = d_Gk_d_pik_data[0] * d_pi_d_pk_data_row_major[1] + d_Gk_d_pik_data[1] * d_pi_d_pk_data_row_major[4]; // col 1 of J_c_pk
+            d_Gk_d_pk_chain_val.z = d_Gk_d_pik_data[0] * d_pi_d_pk_data_row_major[2] + d_Gk_d_pik_data[1] * d_pi_d_pk_data_row_major[5]; // col 2 of J_c_pk
 
-            ::float3 J_c_pk_R_val, J_c_pk_G_val, J_c_pk_B_val;
-            J_c_pk_R_val = CudaMath::add_float3(CudaMath::mul_float3_scalar(d_c_bar_R_d_pk_val, alpha_k_pixel), CudaMath::mul_float3_scalar(d_Gk_d_pk_chain_val, d_c_final_d_Gk_val.x));
-            J_c_pk_G_val = CudaMath::add_float3(CudaMath::mul_float3_scalar(d_c_bar_G_d_pk_val, alpha_k_pixel), CudaMath::mul_float3_scalar(d_Gk_d_pk_chain_val, d_c_final_d_Gk_val.y));
-            J_c_pk_B_val = CudaMath::add_float3(CudaMath::mul_float3_scalar(d_c_bar_B_d_pk_val, alpha_k_pixel), CudaMath::mul_float3_scalar(d_Gk_d_pk_chain_val, d_c_final_d_Gk_val.z));
+
+            glm::vec3 J_c_pk_R_val, J_c_pk_G_val, J_c_pk_B_val;
+            J_c_pk_R_val = d_c_bar_R_d_pk_val * alpha_k_pixel + d_Gk_d_pk_chain_val * d_c_final_d_Gk_val.x;
+            J_c_pk_G_val = d_c_bar_G_d_pk_val * alpha_k_pixel + d_Gk_d_pk_chain_val * d_c_final_d_Gk_val.y;
+            J_c_pk_B_val = d_c_bar_B_d_pk_val * alpha_k_pixel + d_Gk_d_pk_chain_val * d_c_final_d_Gk_val.z;
 
             int pixel_idx_flat = (r * W_img + c) * C_img;
-            ::float3 dL_dc_val_pixel = ::make_float3(dL_dc_pixelwise[pixel_idx_flat+0], dL_dc_pixelwise[pixel_idx_flat+1], dL_dc_pixelwise[pixel_idx_flat+2]);
-            ::float3 d2L_dc2_diag_val_pixel = ::make_float3(d2L_dc2_diag_pixelwise[pixel_idx_flat+0], d2L_dc2_diag_pixelwise[pixel_idx_flat+1], d2L_dc2_diag_pixelwise[pixel_idx_flat+2]);
+            glm::vec3 dL_dc_val_pixel = glm::vec3(dL_dc_pixelwise[pixel_idx_flat+0], dL_dc_pixelwise[pixel_idx_flat+1], dL_dc_pixelwise[pixel_idx_flat+2]);
+            glm::vec3 d2L_dc2_diag_val_pixel = glm::vec3(d2L_dc2_diag_pixelwise[pixel_idx_flat+0], d2L_dc2_diag_pixelwise[pixel_idx_flat+1], d2L_dc2_diag_pixelwise[pixel_idx_flat+2]);
 
             g_p_k_accum_val.x += J_c_pk_R_val.x * dL_dc_val_pixel.x + J_c_pk_G_val.x * dL_dc_val_pixel.y + J_c_pk_B_val.x * dL_dc_val_pixel.z;
             g_p_k_accum_val.y += J_c_pk_R_val.y * dL_dc_val_pixel.x + J_c_pk_G_val.y * dL_dc_val_pixel.y + J_c_pk_B_val.y * dL_dc_val_pixel.z;
