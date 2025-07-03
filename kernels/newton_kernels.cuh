@@ -91,4 +91,48 @@ void project_update_to_3d_kernel_launcher(
     float* out_delta_p
 );
 
+// --- Launchers for Scale Optimization (Placeholders) ---
+
+// Computes Hessian and gradient components for scale parameters
+void compute_scale_hessian_gradient_components_kernel_launcher(
+    // Image dimensions
+    int H_img, int W_img, int C_img,
+    // Model data (need access to means, scales, rotations, opacities, SHs for full ∂c/∂s_k)
+    // For simplicity, let's assume these are passed via some context or specific tensors
+    int P_total, // Total number of Gaussians in model
+    const torch::Tensor& means_all,     // [P_total, 3]
+    const torch::Tensor& scales_all,    // [P_total, 3]
+    const torch::Tensor& rotations_all, // [P_total, 4]
+    const torch::Tensor& opacities_all, // [P_total]
+    const torch::Tensor& shs_all,       // [P_total, K, 3]
+    int sh_degree,
+    // Camera
+    const torch::Tensor& view_matrix,   // [4,4] or [1,4,4]
+    const torch::Tensor& K_matrix,      // [3,3] or [1,3,3]
+    const torch::Tensor& cam_pos_world, // [3]
+    // Render output from primary view (e.g., for tile information if applicable)
+    const gs::RenderOutput& render_output, // May not be fully needed if we re-evaluate coverage
+    // Visibility
+    const torch::Tensor& visible_indices, // Indices of visible Gaussians [N_vis]
+    // Loss derivatives (pixel-wise from primary view)
+    const torch::Tensor& dL_dc_pixelwise,        // [H_img, W_img, C_img]
+    const torch::Tensor& d2L_dc2_diag_pixelwise, // [H_img, W_img, C_img]
+    // Output arrays (for visible Gaussians)
+    torch::Tensor& out_H_s_packed, // [N_vis, 6] (for 3x3 symmetric Hessian of scales)
+    torch::Tensor& out_g_s         // [N_vis, 3] (gradient w.r.t. scales)
+    // bool debug_prints_enabled (already added to position launcher, could add here too)
+);
+
+// Solves batch 3x3 linear systems H_s * delta_s = -g_s
+// (Note: paper might project scales to 2D eigenvalues, then it'd be a 2x2 solve)
+void batch_solve_3x3_system_kernel_launcher(
+    int num_systems,
+    const torch::Tensor& H_s_packed, // [N_vis, 6]
+    const torch::Tensor& g_s,        // [N_vis, 3]
+    float damping,
+    // float step_scale is not here, applied in C++ after solve
+    torch::Tensor& out_delta_s       // [N_vis, 3]
+);
+
+
 } // namespace NewtonKernels
