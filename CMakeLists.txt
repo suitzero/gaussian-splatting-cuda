@@ -193,6 +193,7 @@ target_include_directories(gaussian_kernels
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_BINARY_DIR}/include  # For generated config.h
         ${CMAKE_CURRENT_SOURCE_DIR}/kernels # Changed from include/kernels to find newton_kernels.cuh
+        ${CMAKE_CURRENT_SOURCE_DIR}/gsplat  # Added to find gsplat/Ops.h
         ${CUDAToolkit_INCLUDE_DIRS}
         ${OPENGL_INCLUDE_DIRS}
         PRIVATE
