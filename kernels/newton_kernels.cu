@@ -514,6 +514,54 @@ void NewtonKernels::batch_solve_3x3_system_kernel_launcher(
     // The calling C++ code currently zeros delta_s and does a pseudo-GD step.
 }
 
+// --- Definitions for Rotation Optimization Launchers (Stubs) ---
+
+void NewtonKernels::compute_rotation_hessian_gradient_components_kernel_launcher(
+    int H_img, int W_img, int C_img,
+    int P_total,
+    const torch::Tensor& means_all,
+    const torch::Tensor& scales_all,
+    const torch::Tensor& rotations_all,
+    const torch::Tensor& opacities_all,
+    const torch::Tensor& shs_all,
+    int sh_degree,
+    const torch::Tensor& view_matrix,
+    const torch::Tensor& K_matrix,
+    const torch::Tensor& cam_pos_world,
+    const torch::Tensor& r_k_vecs,
+    const gs::RenderOutput& render_output,
+    const torch::Tensor& visible_indices,
+    const torch::Tensor& dL_dc_pixelwise,
+    const torch::Tensor& d2L_dc2_diag_pixelwise,
+    torch::Tensor& out_H_theta,
+    torch::Tensor& out_g_theta) {
+    // This function would:
+    // 1. Prepare raw pointers from input tensors.
+    // 2. Launch CUDA kernel(s) to compute ∂c/∂θ_k, ∂²c/∂θ_k², and then accumulate
+    //    H_θ_k and g_θ_k for each visible Gaussian, using r_k as rotation axis.
+    // For now, it does nothing; out_H_theta and out_g_theta remain as initialized.
+    // if (options_debug_print_shapes_can_be_passed_here) {
+    //     printf("[STUB KERNEL LAUNCHER] compute_rotation_hessian_gradient_components_kernel_launcher called.\n");
+    // }
+}
+
+void NewtonKernels::batch_solve_1x1_system_kernel_launcher(
+    int num_systems,
+    const torch::Tensor& H_theta,
+    const torch::Tensor& g_theta,
+    float damping,
+    torch::Tensor& out_delta_theta) {
+    // This function would:
+    // 1. Prepare raw pointers.
+    // 2. Launch a CUDA kernel to solve N independent 1x1 systems:
+    //    (H_theta_k + damping) * Δθ_k = -g_theta_k  => Δθ_k = -g_theta_k / (H_theta_k + damping)
+    // For now, it does nothing; out_delta_theta remains as initialized.
+    // The calling C++ code in NewtonOptimizer currently has a placeholder for this.
+    // if (options_debug_print_shapes_can_be_passed_here) {
+    //     printf("[STUB KERNEL LAUNCHER] batch_solve_1x1_system_kernel_launcher called for %d systems.\n", num_systems);
+    // }
+}
+
 
 // Make sure torch_utils.hpp has these definitions or similar:
 // namespace gs { namespace torch_utils {
