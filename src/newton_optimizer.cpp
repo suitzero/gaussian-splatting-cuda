@@ -237,15 +237,41 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
 
 
     // Prepare arguments for kernel launcher by getting data pointers
-    // We assume that if verbose_tensor_check_lambda didn't throw or log a FAILED for data_ptr,
-    // the call within gs::torch_utils should also be 'safer', though an access violation
-    // might still occur if the tensor metadata is deeply corrupted in a way checks don't catch.
+    // Storing tensors locally before checking and getting data_ptr
 
-    const float* means_3d_all_ptr = gs::torch_utils::get_const_data_ptr<float>(model_snapshot.get_means(), "model_snapshot.get_means()");
-    const float* scales_all_ptr = gs::torch_utils::get_const_data_ptr<float>(model_snapshot.get_scaling(), "model_snapshot.get_scaling()");
-    const float* rotations_all_ptr = gs::torch_utils::get_const_data_ptr<float>(model_snapshot.get_rotation(), "model_snapshot.get_rotation()");
-    const float* opacities_all_ptr = gs::torch_utils::get_const_data_ptr<float>(model_snapshot.get_opacity(), "model_snapshot.get_opacity()");
-    const float* shs_all_ptr = gs::torch_utils::get_const_data_ptr<float>(model_snapshot.get_shs(), "model_snapshot.get_shs()");
+    const torch::Tensor& arg_means3D = model_snapshot.get_means();
+    const torch::Tensor& arg_scales = model_snapshot.get_scaling();
+    const torch::Tensor& arg_rotations = model_snapshot.get_rotation();
+    const torch::Tensor& arg_opacities = model_snapshot.get_opacity();
+    const torch::Tensor& arg_shs = model_snapshot.get_shs();
+    // view_mat_tensor, K_matrix, cam_pos_tensor, radii_for_kernel_tensor, visibility_mask_for_model,
+    // loss_derivs.dL_dc, loss_derivs.d2L_dc2_diag, H_p_output_packed, grad_p_output are already local variables.
+
+    if (options_.debug_print_shapes) {
+        // verbose_tensor_check_lambda was defined earlier if options_.debug_print_shapes is true
+        verbose_tensor_check_lambda("arg_means3D", arg_means3D, "float");
+        verbose_tensor_check_lambda("arg_scales", arg_scales, "float");
+        verbose_tensor_check_lambda("arg_rotations", arg_rotations, "float");
+        verbose_tensor_check_lambda("arg_opacities", arg_opacities, "float");
+        verbose_tensor_check_lambda("arg_shs", arg_shs, "float");
+        verbose_tensor_check_lambda("view_mat_tensor", view_mat_tensor, "float"); // Already local
+        verbose_tensor_check_lambda("K_matrix", K_matrix, "float"); // Already local
+        verbose_tensor_check_lambda("cam_pos_tensor", cam_pos_tensor, "float"); // Already local
+        verbose_tensor_check_lambda("render_output.means2d", render_output.means2d, "float");
+        verbose_tensor_check_lambda("render_output.depths", render_output.depths, "float");
+        verbose_tensor_check_lambda("radii_for_kernel_tensor", radii_for_kernel_tensor, "float"); // Already local
+        verbose_tensor_check_lambda("visibility_mask_for_model", visibility_mask_for_model, "bool"); // Already local
+        verbose_tensor_check_lambda("loss_derivs.dL_dc", loss_derivs.dL_dc, "float");
+        verbose_tensor_check_lambda("loss_derivs.d2L_dc2_diag", loss_derivs.d2L_dc2_diag, "float");
+        verbose_tensor_check_lambda("H_p_output_packed", H_p_output_packed, "float"); // Already local
+        verbose_tensor_check_lambda("grad_p_output", grad_p_output, "float"); // Already local
+    }
+
+    const float* means_3d_all_ptr = gs::torch_utils::get_const_data_ptr<float>(arg_means3D, "arg_means3D");
+    const float* scales_all_ptr = gs::torch_utils::get_const_data_ptr<float>(arg_scales, "arg_scales");
+    const float* rotations_all_ptr = gs::torch_utils::get_const_data_ptr<float>(arg_rotations, "arg_rotations");
+    const float* opacities_all_ptr = gs::torch_utils::get_const_data_ptr<float>(arg_opacities, "arg_opacities");
+    const float* shs_all_ptr = gs::torch_utils::get_const_data_ptr<float>(arg_shs, "arg_shs");
     const float* view_matrix_ptr = gs::torch_utils::get_const_data_ptr<float>(view_mat_tensor, "view_mat_tensor");
     const float* K_matrix_ptr = gs::torch_utils::get_const_data_ptr<float>(K_matrix, "K_matrix");
     const float* cam_pos_world_ptr = gs::torch_utils::get_const_data_ptr<float>(cam_pos_tensor, "cam_pos_tensor");
@@ -257,7 +283,6 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
     const float* d2L_dc2_diag_pixelwise_ptr = gs::torch_utils::get_const_data_ptr<float>(loss_derivs.d2L_dc2_diag, "loss_derivs.d2L_dc2_diag");
     float* H_p_output_packed_ptr = gs::torch_utils::get_data_ptr<float>(H_p_output_packed, "H_p_output_packed");
     float* grad_p_output_ptr = gs::torch_utils::get_data_ptr<float>(grad_p_output, "grad_p_output");
-
 
     NewtonKernels::compute_position_hessian_components_kernel_launcher(
         render_output.height, render_output.width, render_output.image.size(-1), // Image: H, W, C
