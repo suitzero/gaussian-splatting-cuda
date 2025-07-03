@@ -13,7 +13,7 @@ inline int GET_BLOCKS(const int N) {
     return (N + CUDA_NUM_THREADS - 1) / CUDA_NUM_THREADS;
 }
 
-// --- KERNEL IMPLEMENTATIONS ---
+// --- KERNEL DEFINITIONS ---
 
 // Kernel for L1/L2 dL/dc and d2L/dc2
 __global__ void compute_l1l2_loss_derivatives_kernel(
@@ -240,6 +240,103 @@ __global__ void project_update_to_3d_kernel(
     out_delta_p[idx*3 + 0] = ux[0] * dvx + uy[0] * dvy;
     out_delta_p[idx*3 + 1] = ux[1] * dvx + uy[1] * dvy;
     out_delta_p[idx*3 + 2] = ux[2] * dvx + uy[2] * dvy;
+}
+
+// --- Spherical Harmonics Basis Evaluation Kernel ---
+// Based on gsplat's sh_coeffs_to_color_fast, but only computes basis values.
+__global__ void eval_sh_basis_kernel(
+    const int num_points, const int degree,
+    const float* dirs, float* sh_basis_output) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_points) return;
+    float x = dirs[idx * 3 + 0]; float y = dirs[idx * 3 + 1]; float z = dirs[idx * 3 + 2];
+    int num_sh_coeffs = (degree + 1) * (degree + 1);
+    float* current_sh_output = sh_basis_output + idx * num_sh_coeffs;
+    current_sh_output[0] = 0.2820947917738781f;
+    if (degree == 0) return;
+    current_sh_output[1] = -0.48860251190292f * y;
+    current_sh_output[2] = 0.48860251190292f * z;
+    current_sh_output[3] = -0.48860251190292f * x;
+    if (degree == 1) return;
+    float z2 = z * z; float fTmp0B = -1.092548430592079f * z;
+    float fC1 = x * x - y * y; float fS1 = 2.f * x * y;
+    current_sh_output[4] = 0.5462742152960395f * fS1;
+    current_sh_output[5] = fTmp0B * y;
+    current_sh_output[6] = (0.9461746957575601f * z2 - 0.3153915652525201f);
+    current_sh_output[7] = fTmp0B * x;
+    current_sh_output[8] = 0.5462742152960395f * fC1;
+    if (degree == 2) return;
+    float fTmp0C = -2.285228997322329f * z2 + 0.4570457994644658f;
+    float fTmp1B = 1.445305721320277f * z;
+    float fC2 = x * fC1 - y * fS1; float fS2 = x * fS1 + y * fC1;
+    current_sh_output[9]  = -0.5900435899266435f * fS2;
+    current_sh_output[10] = fTmp1B * fS1;
+    current_sh_output[11] = fTmp0C * y;
+    current_sh_output[12] = z * (1.865881662950577f * z2 - 1.119528997770346f);
+    current_sh_output[13] = fTmp0C * x;
+    current_sh_output[14] = fTmp1B * fC1;
+    current_sh_output[15] = -0.5900435899266435f * fC2;
+    if (degree == 3) return;
+    float fTmp0D = z * (-4.683325804901025f * z2 + 2.007139630671868f);
+    float fTmp1C = 3.31161143515146f * z2 - 0.47308734787878f;
+    float fTmp2B = -1.770130769779931f * z;
+    float fC3 = x * fC2 - y * fS2; float fS3 = x * fS2 + y * fC2;
+    float pSH6_val = (0.9461746957575601f * z2 - 0.3153915652525201f);
+    float pSH12_val = z * (1.865881662950577f * z2 - 1.119528997770346f);
+    current_sh_output[16] = 0.6258357354491763f * fS3;
+    current_sh_output[17] = fTmp2B * fS2;
+    current_sh_output[18] = fTmp1C * fS1;
+    current_sh_output[19] = fTmp0D * y;
+    current_sh_output[20] = (1.984313483298443f * z * pSH12_val - 1.006230589874905f * pSH6_val);
+    current_sh_output[21] = fTmp0D * x;
+    current_sh_output[22] = fTmp1C * fC1;
+    current_sh_output[23] = fTmp2B * fC2;
+    current_sh_output[24] = 0.6258357354491763f * fC3;
+}
+
+// --- Kernel for batch 3x3 solve ---
+__global__ void batch_solve_3x3_symmetric_system_kernel(
+    int num_systems,
+    const float* H_packed, const float* g,
+    float damping, float* out_x) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_systems) return;
+    const float* Hp = &H_packed[idx * 6];
+    const float* gp = &g[idx * 3];
+    float* xp = &out_x[idx * 3];
+    float a00 = Hp[0] + damping; float a01 = Hp[1];         float a02 = Hp[2];
+    float a10 = Hp[1];         float a11 = Hp[3] + damping; float a12 = Hp[4];
+    float a20 = Hp[2];         float a21 = Hp[4];         float a22 = Hp[5] + damping;
+    float detA = a00 * (a11 * a22 - a12 * a21) -
+                 a01 * (a10 * a22 - a12 * a20) +
+                 a02 * (a10 * a21 - a11 * a20);
+    if (abs(detA) < 1e-9f) {
+        xp[0] = -gp[0] / (a00 + 1e-6f);
+        xp[1] = -gp[1] / (a11 + 1e-6f);
+        xp[2] = -gp[2] / (a22 + 1e-6f);
+        return;
+    }
+    float invDetA = 1.0f / detA;
+    xp[0] = invDetA * ((a11*a22 - a12*a21)*(-gp[0]) + (a02*a21 - a01*a22)*(-gp[1]) + (a01*a12 - a02*a11)*(-gp[2]));
+    xp[1] = invDetA * ((a12*a20 - a10*a22)*(-gp[0]) + (a00*a22 - a02*a20)*(-gp[1]) + (a02*a10 - a00*a12)*(-gp[2]));
+    xp[2] = invDetA * ((a10*a21 - a11*a20)*(-gp[0]) + (a01*a20 - a00*a21)*(-gp[1]) + (a00*a11 - a01*a10)*(-gp[2]));
+}
+
+// --- Kernel for batch 1x1 solve ---
+__global__ void batch_solve_1x1_system_kernel(
+    int num_systems,
+    const float* H_scalar, const float* g_scalar,
+    float damping, float* out_x) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_systems) return;
+    float h_val = H_scalar[idx];
+    float g_val = g_scalar[idx];
+    float h_damped = h_val + damping;
+    if (abs(h_damped) < 1e-9f) {
+        out_x[idx] = 0.0f;
+    } else {
+        out_x[idx] = -g_val / h_damped;
+    }
 }
 
 
@@ -601,30 +698,6 @@ void NewtonKernels::batch_solve_1x1_system_kernel_launcher(
         delta_theta_ptr
     );
     CUDA_CHECK(cudaGetLastError());
-}
-
-// --- Kernel for batch 1x1 solve ---
-// Solves (H + damping) * x = -g for x (scalar case)
-__global__ void batch_solve_1x1_system_kernel(
-    int num_systems,
-    const float* H_scalar, // [N] or [N,1]
-    const float* g_scalar, // [N] or [N,1]
-    float damping,
-    float* out_x) {        // [N] or [N,1]
-
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_systems) return;
-
-    float h_val = H_scalar[idx];
-    float g_val = g_scalar[idx];
-
-    float h_damped = h_val + damping;
-
-    if (abs(h_damped) < 1e-9f) { // Avoid division by zero
-        out_x[idx] = 0.0f; // Or some other fallback, like -g_val / (small_epsilon)
-    } else {
-        out_x[idx] = -g_val / h_damped;
-    }
 }
 
 // --- Definitions for Opacity Optimization Launchers (Stubs) ---
