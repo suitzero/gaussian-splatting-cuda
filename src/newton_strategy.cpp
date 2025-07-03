@@ -51,40 +51,26 @@ void NewtonStrategy::initialize(const gs::param::OptimizationParameters& optimPa
 }
 
 void NewtonStrategy::compute_visibility_mask_for_model(const gs::RenderOutput& render_output, const SplatData& model) {
-    // This is a placeholder. A robust solution needs the 'ranks' tensor from gsplat's projection output,
-    // which maps the P_render Gaussians in render_output.visibility back to their original P_total indices.
-    // render_output.visibility is a mask on P_render Gaussians.
-    // We need a mask on P_total Gaussians.
+    // Based on investigation, render_output.visibility is already a boolean mask
+    // of shape [P_total] (total number of Gaussians in the model),
+    // indicating which Gaussians have a projected radius > 0.
+    // This is suitable for use as visibility_mask_for_model.
 
-    if (!render_output.visibility.defined() || model.size() == 0) {
-        current_visibility_mask_for_model_ = torch::zeros({model.size()}, torch::kBool).to(model.get_means().device());
+    if (!render_output.visibility.defined()) {
+        std::cerr << "Warning: render_output.visibility is not defined in NewtonStrategy. Defaulting to all-false mask." << std::endl;
+        current_visibility_mask_for_model_ = torch::zeros({model.size()},
+            torch::TensorOptions().dtype(torch::kBool).device(model.get_means().device()));
         return;
     }
 
-    // Simplistic assumption: if render_output.visibility has P_total elements, use it directly.
-    // This is unlikely to be correct.
-    if (render_output.visibility.size(0) == model.size()) {
-        current_visibility_mask_for_model_ = render_output.visibility.to(torch::kBool);
-    } else {
-        // Fallback: assume all are visible if mapping is unknown. This is not ideal for performance.
-        // Or, assume none are if P_render is much smaller and no mapping.
-        // For safety and to avoid processing non-rendered Gaussians, default to false if sizes mismatch badly.
-        // A better placeholder: if render_output.visibility is for P_render, and we lack ranks,
-        // we can't directly create a P_total mask from it.
-        // The `visibility_mask_for_model` passed to NewtonOptimizer::step will be crucial.
-        // For now, this strategy can't produce it correctly without `ranks`.
-        // Let's set it to all false, relying on Trainer to perhaps provide a better one if possible,
-        // or highlighting this as a deficiency.
-        std::cerr << "Warning: Cannot accurately compute visibility_mask_for_model in NewtonStrategy without ranks tensor."
-                  << "Using a conservative (all false) mask. Newton optimizer might not update much." << std::endl;
-        current_visibility_mask_for_model_ = torch::zeros({model.size()}, torch::kBool).to(model.get_means().device());
-        // A slightly better placeholder if render_output.visibility is boolean and for P_render:
-        // Assume the first P_render elements of the model correspond to render_output.visibility
-        // THIS IS A VERY STRONG AND LIKELY WRONG ASSUMPTION.
-        // if (render_output.visibility.size(0) > 0 && render_output.visibility.size(0) <= model.size()) {
-        //     current_visibility_mask_for_model_.slice(0, 0, render_output.visibility.size(0)) = render_output.visibility.to(torch::kBool);
-        // }
-    }
+    TORCH_CHECK(render_output.visibility.dim() == 1 && render_output.visibility.size(0) == model.size(),
+                "NewtonStrategy: render_output.visibility shape mismatch. Expected [P_total], got ",
+                render_output.visibility.sizes());
+    TORCH_CHECK(render_output.visibility.scalar_type() == torch::kBool,
+                "NewtonStrategy: render_output.visibility dtype mismatch. Expected Bool, got ",
+                render_output.visibility.scalar_type());
+
+    current_visibility_mask_for_model_ = render_output.visibility.to(model.get_means().device()); // Ensure it's on the same device
 }
 
 

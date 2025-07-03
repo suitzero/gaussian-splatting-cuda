@@ -328,8 +328,18 @@ void NewtonOptimizer::step(int iteration,
     torch::Tensor visible_indices = torch::where(visibility_mask_for_model)[0];
     int num_visible_gaussians_in_model = visible_indices.size(0);
 
+    if (options_.debug_print_shapes) {
+        std::cout << "[NewtonOpt] Step - Iteration: " << iteration
+                  << ", num_visible_gaussians_in_model (from mask): " << num_visible_gaussians_in_model
+                  << ", visibility_mask_for_model sum: " << visibility_mask_for_model.sum().item<long>()
+                  << std::endl;
+    }
+
     if (num_visible_gaussians_in_model == 0) {
-        return;
+        if (options_.debug_print_shapes) {
+             std::cout << "[NewtonOpt] Step: No visible Gaussians based on mask at iteration " << iteration << ". Skipping Newton update." << std::endl;
+        }
+        return; // Early exit
     }
 
     torch::Tensor means_visible_from_model = model_.means().detach().index_select(0, visible_indices);
