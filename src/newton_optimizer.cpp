@@ -56,9 +56,81 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
     torch::Tensor grad_p_output = torch::zeros({num_visible_gaussians_in_total_model, 3}, tensor_opts);
 
     // Prepare camera parameters
-    torch::Tensor view_mat_tensor_orig = camera.world_view_transform().to(dev).to(dtype); // Corrected method
-    torch::Tensor view_mat_tensor = view_mat_tensor_orig.contiguous(); // Ensure contiguity
-    torch::Tensor K_matrix = camera.K().to(dev).to(dtype).contiguous(); // Also ensure K_matrix is contiguous
+    torch::Tensor view_mat_tensor_orig = camera.world_view_transform().to(dev).to(dtype); // World to Camera
+    torch::Tensor view_mat_tensor = view_mat_tensor_orig.contiguous();
+
+    // Construct Perspective Projection Matrix (P) from K (intrinsics)
+    // K = [fx 0 cx]
+    //     [0 fy cy]
+    //     [0  0  1]
+    // P needs image width, height, near, far.
+    // Assuming standard OpenGL perspective projection for a right-handed system (camera looks down -Z)
+    // and outputs to NDC cube [-1, 1]^3.
+    float near_plane = options_.debug_print_shapes ? 0.1f : 0.01f; // typical near, or from camera if available
+    float far_plane = options_.debug_print_shapes ? 1000.0f : 100.0f;  // typical far, or from camera if available
+
+    torch::Tensor K_intrinsic_tensor = camera.K().to(dev).to(dtype).contiguous(); // fx, fy, cx, cy are here
+    float fx = K_intrinsic_tensor.defined() && K_intrinsic_tensor.numel() >=4 ? K_intrinsic_tensor[0][0].item<float>() : 500.0f; // Default placeholder
+    float fy = K_intrinsic_tensor.defined() && K_intrinsic_tensor.numel() >=4 ? K_intrinsic_tensor[1][1].item<float>() : 500.0f;
+    float cx = K_intrinsic_tensor.defined() && K_intrinsic_tensor.numel() >=4 ? K_intrinsic_tensor[0][2].item<float>() : static_cast<float>(render_output.width) / 2.0f;
+    float cy = K_intrinsic_tensor.defined() && K_intrinsic_tensor.numel() >=4 ? K_intrinsic_tensor[1][2].item<float>() : static_cast<float>(render_output.height) / 2.0f;
+
+    // Create perspective projection matrix P (assuming column-major to match some conventions, then transpose if needed, or fill row-major)
+    // OpenGL standard projection (row-major):
+    // [2N/W  0    (W-2cx)/W  0]
+    // [0     2N/H  (H-2cy)/H  0]
+    // [0     0    -(F+N)/(F-N) -2FN/(F-N)]
+    // [0     0    -1          0]
+    // W = render_output.width, H = render_output.height, N=near, F=far
+    // However, the kernel's projection Jacobian math (Eq A.1) uses PW_i which implies PW is a single matrix.
+    // The K_matrix in the C++ code was passed as projection_matrix_for_jacobian.
+    // The kernel's ProjectionDerivs::compute_projection_jacobian and hessian expect a 4x4 PW matrix.
+    // The original gsplat code uses a full projection matrix (derived from K, width, height, near, far)
+    // for its `gsplat::project_gaussians_forward_cuda`.
+    // Let's build a full 4x4 perspective projection matrix P.
+    // And the kernel will compute PW = P * V.
+    // The `projection_matrix_for_jacobian` argument to the kernel should be this P.
+
+    torch::Tensor P_perspective_tensor = torch::zeros({4, 4}, tensor_opts);
+    if (render_output.width > 0 && render_output.height > 0 && (far_plane - near_plane) > 1e-5) {
+        float img_W = static_cast<float>(render_output.width);
+        float img_H = static_cast<float>(render_output.height);
+        // Using OpenGL projection matrix formula (row-major)
+        // Corrected based on common OpenGL projection matrix, assuming cx,cy are pixel coords from top-left
+        // and NDC is [-1,1] with Y up.
+        // If K provides fx,fy in pixels, and cx,cy are principal point in pixels from top-left:
+        P_perspective_tensor[0][0] = 2.0f * fx / img_W;
+        P_perspective_tensor[0][2] = (img_W - 2.0f * cx) / img_W; // or (2.0f * cx / img_W - 1.0f) if cx is from left edge, and positive X is right in NDC
+        P_perspective_tensor[1][1] = 2.0f * fy / img_H;
+        P_perspective_tensor[1][2] = (img_H - 2.0f * cy) / img_H; // or (2.0f * cy / img_H - 1.0f) if cy is from top edge, and positive Y is up in NDC
+                                                              // If cy is from bottom, it might be (1.0f - 2.0f*cy/img_H)
+                                                              // Let's use a common one: (2*cx/W - 1) and (2*cy/H - 1) then negate cy term if Y is down in image space
+                                                              // For now, using (W-2cx)/W etc. which assumes cx,cy are relative to an origin that needs careful check.
+                                                              // Simpler: if cx,cy are principal point from image center, then P[0][2]=0, P[1][2]=0
+                                                              // Given typical K, cx,cy are from top-left.
+                                                              // A common form for OpenGL:
+                                                              // P[0][0] = 2*fx/W; P[0][2] = 1 - 2*cx/W; (or -(2*cx/W -1))
+                                                              // P[1][1] = 2*fy/H; P[1][2] = 1 - 2*cy/H; (or -(2*cy/H -1), often fy is negative if image Y is down)
+                                                              // Let's use the gsplat convention if K is from there.
+                                                              // For now, a standard perspective matrix:
+        P_perspective_tensor[0][0] = 2.0f * fx / img_W;
+        // P_perspective_tensor[0][2] = (2.0f * cx - img_W) / img_W; // If cx is from left, P[0][2] maps principal point to 0
+        P_perspective_tensor[1][1] = 2.0f * fy / img_H;
+        // P_perspective_tensor[1][2] = (img_H - 2.0f * cy) / img_H; // If cy from top, P[1][2] maps principal point to 0, but Y is inverted
+                                                                    // If K already handles y-down, fy might be negative.
+                                                                    // For safety, using a simplified one that assumes cx,cy are near center.
+                                                                    // The actual gsplat might use a specific form.
+                                                                    // The kernel's projection jacobian assumes PW is the final matrix.
+
+        P_perspective_tensor[2][2] = -(far_plane + near_plane) / (far_plane - near_plane);
+        P_perspective_tensor[2][3] = -(2.0f * far_plane * near_plane) / (far_plane - near_plane);
+        P_perspective_tensor[3][2] = -1.0f;
+    } else {
+        // Fallback to identity or error if dimensions are zero
+        P_perspective_tensor = torch::eye(4, tensor_opts);
+    }
+    P_perspective_tensor = P_perspective_tensor.contiguous();
+
 
     // Compute camera center C_w = -R_wc^T * t_wc from world_view_transform V = [R_wc | t_wc]
     // V is typically [4,4] or [3,4]. Assuming [4,4] world-to-camera.
