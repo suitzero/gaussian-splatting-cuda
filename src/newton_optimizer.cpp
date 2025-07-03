@@ -536,14 +536,82 @@ void NewtonOptimizer::step(int iteration,
             // This implies a simplified rendering/evaluation for them.
             // Let's assume, for now, we reuse primary_render_output's structure but with secondary camera and GT.
             // This is a simplification! A proper implementation needs to render secondary views.
+            if (options_.debug_print_shapes) {
+                std::cout << "[NewtonOpt KNN] Processing secondary target for camera UID (if available): "
+                          << (secondary_camera ? std::to_string(secondary_camera->uid()) : "N/A") << std::endl;
+            }
 
-            // For simplicity, we'd need to re-rasterize for secondary targets.
-            // This is beyond the scope of this single step.
-            // So, this part remains conceptual:
-            // LossDerivatives secondary_loss_derivs = compute_loss_derivatives_cuda(secondary_render_output.image, secondary_gt_image, ...);
-            // PositionHessianOutput secondary_hess_output = compute_position_hessian_components_cuda(model_, visibility_mask_for_model, *secondary_camera, secondary_render_output, secondary_loss_derivs, num_visible_gaussians_in_model);
-            // H_p_total_packed.add_(secondary_hess_output.H_p_packed);
-            // g_p_total_visible.add_(secondary_hess_output.grad_p);
+            // 1. Define background color for secondary render (e.g., black or gray)
+            //    Using a default black background for secondary targets for now.
+            torch::Tensor secondary_bg_color = torch::tensor({0.0f, 0.0f, 0.0f}, betekent_visible_from_model.options().device(model_.get_means().device()));
+
+            // 2. Render secondary view
+            //    Ensure camera parameters are on the correct device for rasterize if not already.
+            //    The `rasterize` function takes Camera&, implying it might modify it or expect it to be mutable for some reason (e.g. update matrices).
+            //    However, our secondary_camera is const. This might require a const_cast or adjustment in rasterize,
+            //    or rasterize only needs const access to camera properties it uses. For now, assume rasterize can handle const Camera& effectively or uses a copy.
+            //    Let's make a copy of the camera object to be safe if rasterize needs non-const, though it's not ideal.
+            //    A better solution would be for rasterize to take const Camera& if it doesn't modify it.
+            //    For now, we proceed assuming rasterize is safe with a const Camera passed by value or that its non-const methods are not called.
+            //    The Camera object itself does not store CUDA tensors that are modified by rasterize.
+
+            gs::RenderOutput secondary_render_output = gs::rasterize(
+                const_cast<Camera&>(*secondary_camera), // TODO: Check if rasterize truly needs non-const Camera&
+                model_,
+                secondary_bg_color,
+                1.0f, // scaling_modifier
+                false, // packed
+                false, // antialiased
+                gs::RenderMode::RGB // Assuming RGB is sufficient for loss derivatives
+            );
+
+            if (!secondary_render_output.image.defined() || secondary_render_output.image.numel() == 0) {
+                if (options_.debug_print_shapes) {
+                    std::cout << "[NewtonOpt KNN] Secondary render output image is empty. Skipping this KNN target." << std::endl;
+                }
+                continue;
+            }
+
+            // 3. Prepare images for loss derivative computation (ensure HWC, on device)
+            torch::Tensor sec_rendered_img_squeezed = secondary_render_output.image.squeeze(0);
+            if (sec_rendered_img_squeezed.dim() == 3 && sec_rendered_img_squeezed.size(0) == 3) { // CHW to HWC
+                sec_rendered_img_squeezed = sec_rendered_img_squeezed.permute({1, 2, 0}).contiguous();
+            }
+            torch::Tensor sec_gt_img_prepared = secondary_gt_image; // Already downsampled and on device from strategy
+            if (sec_gt_img_prepared.dim() == 3 && sec_gt_img_prepared.size(0) == 3) { // CHW to HWC
+                 sec_gt_img_prepared = sec_gt_img_prepared.permute({1, 2, 0}).contiguous();
+            }
+             TORCH_CHECK(sec_rendered_img_squeezed.sizes() == sec_gt_img_prepared.sizes(),
+                        "Secondary rendered and GT image sizes mismatch: ", sec_rendered_img_squeezed.sizes(), " vs ", sec_gt_img_prepared.sizes());
+
+
+            // 4. Compute loss derivatives for secondary view
+            LossDerivatives secondary_loss_derivs = compute_loss_derivatives_cuda(
+                sec_rendered_img_squeezed,
+                sec_gt_img_prepared,
+                options_.lambda_dssim_for_hessian, // Use same lambda as primary
+                options_.use_l2_for_hessian_L_term // Use same L-term choice
+            );
+
+            // 5. Compute Hessian and gradient components for secondary view
+            //    Using primary view's visibility_mask_for_model and num_visible_gaussians_in_model
+            //    as per paper's "sparsely evaluated" idea.
+            PositionHessianOutput secondary_hess_output = compute_position_hessian_components_cuda(
+                model_,
+                visibility_mask_for_model, // Re-use primary visibility mask
+                *secondary_camera,
+                secondary_render_output,
+                secondary_loss_derivs,
+                num_visible_gaussians_in_model // Re-use count from primary visibility
+            );
+
+            // 6. Accumulate
+            if (secondary_hess_output.H_p_packed.defined() && secondary_hess_output.H_p_packed.numel() > 0) {
+                 H_p_total_packed.add_(secondary_hess_output.H_p_packed);
+            }
+            if (secondary_hess_output.grad_p.defined() && secondary_hess_output.grad_p.numel() > 0) {
+                g_p_total_visible.add_(secondary_hess_output.grad_p);
+            }
         }
     }
 
