@@ -543,7 +543,7 @@ void NewtonOptimizer::step(int iteration,
 
             // 1. Define background color for secondary render (e.g., black or gray)
             //    Using a default black background for secondary targets for now.
-            torch::Tensor secondary_bg_color = torch::tensor({0.0f, 0.0f, 0.0f}, betekent_visible_from_model.options().device(model_.get_means().device()));
+            torch::Tensor secondary_bg_color = torch::tensor({0.0f, 0.0f, 0.0f}, model_.get_means().options());
 
             // 2. Render secondary view
             //    Ensure camera parameters are on the correct device for rasterize if not already.
@@ -1075,17 +1075,5 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_sh_updates_newto
     // Reshape delta_shs_flat [N_vis, sh_dim_flat] back to [N_vis, (deg+1)^2, 3]
     torch::Tensor delta_shs = delta_shs_flat.reshape(current_shs_for_opt.sizes());
 
-
-    // TODO: Implement paper's "Color solve"
-    // 1. Get current SHs: model_.get_shs().index_select(0, visible_indices)
-    // 2. Compute ∂c_R/∂c_{k,R} (paper says ∂²c_R/∂c_{k,R}² = 0), per channel.
-    //    Involves SH basis B_k(r_k).
-    // 3. Assemble H_ck_R, g_ck_R for each channel.
-    // 4. Solve Δc_{k,R} = -H_ck_R⁻¹ g_ck_R for each channel.
-    if (visible_indices.numel() == 0) return AttributeUpdateOutput(torch::empty({0}), false);
-    torch::Tensor current_shs = model_.get_shs().index_select(0, visible_indices);
-    if (current_shs.numel() > 0) {
-        return AttributeUpdateOutput(torch::zeros_like(current_shs));
-    }
-    return AttributeUpdateOutput(torch::empty({0}, model_.get_shs().options()));
+    return AttributeUpdateOutput(delta_shs, true); // Return the (currently zero) delta
 }
