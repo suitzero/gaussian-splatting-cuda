@@ -36,6 +36,13 @@ void NewtonStrategy::initialize(const gs::param::OptimizationParameters& optimPa
         newton_opts.lambda_dssim_for_hessian = optim_params_cache_.newton_lambda_dssim_for_hessian;
         newton_opts.use_l2_for_hessian_L_term = optim_params_cache_.newton_use_l2_for_hessian_L_term;
 
+        // Attribute-specific optimization flags
+        newton_opts.optimize_means = optim_params_cache_.newton_optimize_means;
+        newton_opts.optimize_scales = optim_params_cache_.newton_optimize_scales;
+        newton_opts.optimize_rotations = optim_params_cache_.newton_optimize_rotations;
+        newton_opts.optimize_opacities = optim_params_cache_.newton_optimize_opacities;
+        newton_opts.optimize_shs = optim_params_cache_.newton_optimize_shs;
+
         optimizer_ = std::make_unique<NewtonOptimizer>(*splat_data_, optim_params_cache_, newton_opts);
 
         // No need to call cache_camera_references() again if called in constructor,

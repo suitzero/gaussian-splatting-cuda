@@ -510,8 +510,27 @@ void NewtonKernels::batch_solve_3x3_system_kernel_launcher(
     // 1. Prepare raw pointers.
     // 2. Launch a CUDA kernel to solve N independent 3x3 systems: H_s * Δs = -g_s.
     //    (H_s is symmetric, so 6 unique elements from H_s_packed).
-    // For now, it does nothing, out_delta_s remains as initialized (e.g. zeros if we expect it to be filled).
-    // The calling C++ code currently zeros delta_s and does a pseudo-GD step.
+    TORCH_CHECK(H_s_packed.defined() && H_s_packed.dim() == 2 && H_s_packed.size(1) == 6, "H_s_packed shape must be [N, 6]");
+    TORCH_CHECK(g_s.defined() && g_s.dim() == 2 && g_s.size(1) == 3, "g_s shape must be [N, 3]");
+    TORCH_CHECK(out_delta_s.defined() && out_delta_s.dim() == 2 && out_delta_s.size(1) == 3, "out_delta_s shape must be [N, 3]");
+    TORCH_CHECK(H_s_packed.size(0) == num_systems && g_s.size(0) == num_systems && out_delta_s.size(0) == num_systems, "Batch size mismatch");
+    TORCH_CHECK(H_s_packed.is_cuda() && g_s.is_cuda() && out_delta_s.is_cuda(), "All tensors must be CUDA tensors");
+    TORCH_CHECK(H_s_packed.is_contiguous() && g_s.is_contiguous() && out_delta_s.is_contiguous(), "All tensors must be contiguous");
+
+    if (num_systems == 0) return;
+
+    const float* H_ptr = gs::torch_utils::get_const_data_ptr<float>(H_s_packed, "H_s_packed");
+    const float* g_ptr = gs::torch_utils::get_const_data_ptr<float>(g_s, "g_s");
+    float* delta_s_ptr = gs::torch_utils::get_data_ptr<float>(out_delta_s, "out_delta_s");
+
+    batch_solve_3x3_symmetric_system_kernel<<<GET_BLOCKS(num_systems), CUDA_NUM_THREADS>>>(
+        num_systems,
+        H_ptr,
+        g_ptr,
+        damping,
+        delta_s_ptr
+    );
+    CUDA_CHECK(cudaGetLastError());
 }
 
 // --- Definitions for Rotation Optimization Launchers (Stubs) ---
@@ -560,6 +579,28 @@ void NewtonKernels::batch_solve_1x1_system_kernel_launcher(
     // if (options_debug_print_shapes_can_be_passed_here) {
     //     printf("[STUB KERNEL LAUNCHER] batch_solve_1x1_system_kernel_launcher called for %d systems.\n", num_systems);
     // }
+    TORCH_CHECK(H_theta.defined() && H_theta.size(0) == num_systems, "H_theta size mismatch");
+    TORCH_CHECK(g_theta.defined() && g_theta.size(0) == num_systems, "g_theta size mismatch");
+    TORCH_CHECK(out_delta_theta.defined() && out_delta_theta.size(0) == num_systems, "out_delta_theta size mismatch");
+    TORCH_CHECK(H_theta.is_cuda() && g_theta.is_cuda() && out_delta_theta.is_cuda(), "All tensors must be CUDA tensors");
+    // Assuming tensors can be [N] or [N,1].contiguous() makes them effectively [N] for data_ptr.
+    // If they must be [N,1], ensure contiguity after potential reshape.
+    // For simplicity, assume they are already prepared as contiguous (e.g. after .contiguous() call if reshaped from [N,1])
+
+    if (num_systems == 0) return;
+
+    const float* H_ptr = gs::torch_utils::get_const_data_ptr<float>(H_theta.contiguous(), "H_theta");
+    const float* g_ptr = gs::torch_utils::get_const_data_ptr<float>(g_theta.contiguous(), "g_theta");
+    float* delta_theta_ptr = gs::torch_utils::get_data_ptr<float>(out_delta_theta.contiguous(), "out_delta_theta"); // Ensure contiguous for output too
+
+    batch_solve_1x1_system_kernel<<<GET_BLOCKS(num_systems), CUDA_NUM_THREADS>>>(
+        num_systems,
+        H_ptr,
+        g_ptr,
+        damping,
+        delta_theta_ptr
+    );
+    CUDA_CHECK(cudaGetLastError());
 }
 
 // --- Definitions for Opacity Optimization Launchers (Stubs) ---
@@ -595,6 +636,10 @@ void NewtonKernels::compute_opacity_hessian_gradient_components_kernel_launcher(
     // if (options_debug_print_shapes_can_be_passed_here) { // Assuming a debug flag could be passed
     //     printf("[STUB KERNEL LAUNCHER] compute_opacity_hessian_gradient_components_kernel_launcher called.\n");
     // }
+    // This is a stub. A real implementation needs a kernel.
+    // For now, to avoid linker errors if called, we ensure outputs are zeroed if they are not already.
+    if (out_H_sigma_base.defined()) out_H_sigma_base.zero_();
+    if (out_g_sigma_base.defined()) out_g_sigma_base.zero_();
 }
 
 // --- Definitions for SH (Color) Optimization Launchers (Stubs) ---
@@ -610,10 +655,33 @@ torch::Tensor NewtonKernels::compute_sh_bases_kernel_launcher(
     // if (options_debug_print_shapes_can_be_passed_here) {
     //     printf("[STUB KERNEL LAUNCHER] compute_sh_bases_kernel_launcher called.\n");
     // }
-    if (normalized_view_vectors.numel() == 0) {
+    TORCH_CHECK(normalized_view_vectors.defined(), "normalized_view_vectors must be defined.");
+    TORCH_CHECK(normalized_view_vectors.dim() == 2 && normalized_view_vectors.size(1) == 3,
+                "normalized_view_vectors must have shape [N, 3]. Got ", normalized_view_vectors.sizes());
+    TORCH_CHECK(normalized_view_vectors.is_cuda(), "normalized_view_vectors must be a CUDA tensor.");
+    TORCH_CHECK(normalized_view_vectors.is_contiguous(), "normalized_view_vectors must be contiguous.");
+    TORCH_CHECK(sh_degree >= 0 && sh_degree <= 4, "sh_degree must be between 0 and 4. Got ", sh_degree);
+
+    const int num_points = normalized_view_vectors.size(0);
+    if (num_points == 0) {
         return torch::empty({0, (sh_degree + 1) * (sh_degree + 1)}, normalized_view_vectors.options());
     }
-    return torch::zeros({normalized_view_vectors.size(0), (sh_degree + 1) * (sh_degree + 1)}, normalized_view_vectors.options());
+
+    const int num_sh_coeffs = (sh_degree + 1) * (sh_degree + 1);
+    torch::Tensor sh_bases_tensor = torch::empty({num_points, num_sh_coeffs}, normalized_view_vectors.options());
+
+    const float* dirs_ptr = gs::torch_utils::get_const_data_ptr<float>(normalized_view_vectors, "normalized_view_vectors");
+    float* sh_basis_output_ptr = gs::torch_utils::get_data_ptr<float>(sh_bases_tensor, "sh_bases_tensor");
+
+    eval_sh_basis_kernel<<<GET_BLOCKS(num_points), CUDA_NUM_THREADS>>>(
+        num_points,
+        sh_degree,
+        dirs_ptr,
+        sh_basis_output_ptr
+    );
+    CUDA_CHECK(cudaGetLastError());
+
+    return sh_bases_tensor;
 }
 
 void NewtonKernels::compute_sh_hessian_gradient_components_kernel_launcher(
@@ -644,8 +712,99 @@ void NewtonKernels::compute_sh_hessian_gradient_components_kernel_launcher(
     // if (options_debug_print_shapes_can_be_passed_here) {
     //     printf("[STUB KERNEL LAUNCHER] compute_sh_hessian_gradient_components_kernel_launcher called.\n");
     // }
+    // This is a stub. A real implementation needs a kernel.
+    // For now, to avoid linker errors if called, we ensure outputs are zeroed.
+    if (out_H_ck_diag.defined()) out_H_ck_diag.zero_();
+    if (out_g_ck.defined()) out_g_ck.zero_();
 }
 
+// --- Kernel for batch 3x3 solve ---
+// Solves (H + damping*I) * x = -g for x, where H is symmetric 3x3
+// H_packed = [H00, H01, H02, H11, H12, H22]
+__global__ void batch_solve_3x3_symmetric_system_kernel(
+    int num_systems,
+    const float* H_packed, // [N, 6]
+    const float* g,        // [N, 3]
+    float damping,
+    float* out_x) {        // [N, 3]
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_systems) return;
+
+    const float* Hp = &H_packed[idx * 6];
+    const float* gp = &g[idx * 3];
+    float* xp = &out_x[idx * 3];
+
+    // Construct matrix A = H + damping*I
+    // A = [ Hp[0]+d  Hp[1]    Hp[2]   ]
+    //     [ Hp[1]    Hp[3]+d  Hp[4]   ]
+    //     [ Hp[2]    Hp[4]    Hp[5]+d ]
+    float a00 = Hp[0] + damping; float a01 = Hp[1];         float a02 = Hp[2];
+    float a10 = Hp[1];         float a11 = Hp[3] + damping; float a12 = Hp[4];
+    float a20 = Hp[2];         float a21 = Hp[4];         float a22 = Hp[5] + damping;
+
+    // Calculate determinant of A
+    float detA = a00 * (a11 * a22 - a12 * a21) -
+                 a01 * (a10 * a22 - a12 * a20) +
+                 a02 * (a10 * a21 - a11 * a20);
+
+    if (abs(detA) < 1e-9f) { // Check for singularity
+        // Fallback: e.g., scaled gradient descent step or zero update
+        // x = -g / (diag(H) + damping)
+        xp[0] = -gp[0] / (a00 + 1e-6f); // Add small epsilon to avoid div by zero if a00 was zero before damping
+        xp[1] = -gp[1] / (a11 + 1e-6f);
+        xp[2] = -gp[2] / (a22 + 1e-6f);
+        return;
+    }
+
+    float invDetA = 1.0f / detA;
+
+    // Calculate adjugate(A) and multiply by -g / detA
+    // adj(A)_00 = (a11*a22 - a12*a21)
+    // adj(A)_01 = (a02*a21 - a01*a22)
+    // adj(A)_02 = (a01*a12 - a02*a11)
+    // ... (transpose for cofactor matrix)
+    // x = A_inv * (-g)
+    xp[0] = invDetA * (
+        (a11 * a22 - a12 * a21) * (-gp[0]) +
+        (a02 * a21 - a01 * a22) * (-gp[1]) +
+        (a01 * a12 - a02 * a11) * (-gp[2])
+    );
+    xp[1] = invDetA * (
+        (a12 * a20 - a10 * a22) * (-gp[0]) +
+        (a00 * a22 - a02 * a20) * (-gp[1]) +
+        (a02 * a10 - a00 * a12) * (-gp[2])
+    );
+    xp[2] = invDetA * (
+        (a10 * a21 - a11 * a20) * (-gp[0]) +
+        (a01 * a20 - a00 * a21) * (-gp[1]) +
+        (a00 * a11 - a01 * a10) * (-gp[2])
+    );
+}
+
+// --- Kernel for batch 1x1 solve ---
+// Solves (H + damping) * x = -g for x (scalar case)
+__global__ void batch_solve_1x1_system_kernel(
+    int num_systems,
+    const float* H_scalar, // [N] or [N,1]
+    const float* g_scalar, // [N] or [N,1]
+    float damping,
+    float* out_x) {        // [N] or [N,1]
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_systems) return;
+
+    float h_val = H_scalar[idx];
+    float g_val = g_scalar[idx];
+
+    float h_damped = h_val + damping;
+
+    if (abs(h_damped) < 1e-9f) { // Avoid division by zero
+        out_x[idx] = 0.0f; // Or some other fallback, like -g_val / (small_epsilon)
+    } else {
+        out_x[idx] = -g_val / h_damped;
+    }
+}
 
 // Make sure torch_utils.hpp has these definitions or similar:
 // namespace gs { namespace torch_utils {
@@ -662,3 +821,96 @@ void NewtonKernels::compute_sh_hessian_gradient_components_kernel_launcher(
 //     return tensor.data_ptr<T>();
 // }
 // }}
+
+// --- Spherical Harmonics Basis Evaluation Kernel ---
+// Based on gsplat's sh_coeffs_to_color_fast, but only computes basis values.
+__global__ void eval_sh_basis_kernel(
+    const int num_points,
+    const int degree,          // Max degree to compute up to
+    const float* dirs,         // [num_points, 3], normalized directions
+    float* sh_basis_output) {  // [num_points, (degree+1)^2]
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_points) return;
+
+    float x = dirs[idx * 3 + 0];
+    float y = dirs[idx * 3 + 1];
+    float z = dirs[idx * 3 + 2];
+
+    // Output is [num_points, max_sh_coeffs_for_degree]
+    // max_sh_coeffs_for_degree depends on the input 'degree'
+    int num_sh_coeffs = (degree + 1) * (degree + 1);
+    float* current_sh_output = sh_basis_output + idx * num_sh_coeffs;
+
+    // Degree 0
+    current_sh_output[0] = 0.2820947917738781f; // Y_0_0
+    if (degree == 0) return;
+
+    // Degree 1
+    // Y_1_-1, Y_1_0, Y_1_1
+    // gsplat order seems to be: (y, z, x) for l=1 components based on sh_coeffs_to_color_fast:
+    // result += 0.48860251190292f * (-y * coeffs[1*3+c] + z * coeffs[2*3+c] - x * coeffs[3*3+c]);
+    // Coeff indices 1,2,3 map to SH components for l=1.
+    // Original SH order: Y_1^-1 ~ y, Y_1^0 ~ z, Y_1^1 ~ x
+    // Let's follow this convention for basis output.
+    current_sh_output[1] = -0.48860251190292f * y; // Corresponds to term with coeffs[1]
+    current_sh_output[2] = 0.48860251190292f * z;  // Corresponds to term with coeffs[2]
+    current_sh_output[3] = -0.48860251190292f * x; // Corresponds to term with coeffs[3]
+    if (degree == 1) return;
+
+    // Degree 2
+    // Coeff indices 4,5,6,7,8
+    // pSH4 (xy), pSH5 (yz), pSH6 (zz), pSH7 (xz), pSH8 (xx-yy)
+    float z2 = z * z;
+    float fTmp0B = -1.092548430592079f * z;
+    float fC1 = x * x - y * y;
+    float fS1 = 2.f * x * y;
+
+    current_sh_output[4] = 0.5462742152960395f * fS1;           // pSH4 -> xy
+    current_sh_output[5] = fTmp0B * y;                          // pSH5 -> yz
+    current_sh_output[6] = (0.9461746957575601f * z2 - 0.3153915652525201f); // pSH6 -> 3z^2-1 type
+    current_sh_output[7] = fTmp0B * x;                          // pSH7 -> xz
+    current_sh_output[8] = 0.5462742152960395f * fC1;           // pSH8 -> x^2-y^2
+    if (degree == 2) return;
+
+    // Degree 3
+    // Coeff indices 9..15
+    // pSH9 (S2x), pSH10 (S1z), pSH11 (C0z), pSH12 (z(zz)), pSH13 (C0x), pSH14 (C1z), pSH15 (C2x)
+    float fTmp0C = -2.285228997322329f * z2 + 0.4570457994644658f;
+    float fTmp1B = 1.445305721320277f * z;
+    float fC2 = x * fC1 - y * fS1; // x(x^2-y^2) - y(2xy) = x^3 - 3xy^2
+    float fS2 = x * fS1 + y * fC1; // x(2xy) + y(x^2-y^2) = 3x^2y - y^3
+
+    current_sh_output[9]  = -0.5900435899266435f * fS2;          // pSH9
+    current_sh_output[10] = fTmp1B * fS1;                         // pSH10
+    current_sh_output[11] = fTmp0C * y;                           // pSH11
+    current_sh_output[12] = z * (1.865881662950577f * z2 - 1.119528997770346f); // pSH12
+    current_sh_output[13] = fTmp0C * x;                           // pSH13
+    current_sh_output[14] = fTmp1B * fC1;                         // pSH14
+    current_sh_output[15] = -0.5900435899266435f * fC2;          // pSH15
+    if (degree == 3) return;
+
+    // Degree 4
+    // Coeff indices 16..24
+    float fTmp0D = z * (-4.683325804901025f * z2 + 2.007139630671868f);
+    float fTmp1C = 3.31161143515146f * z2 - 0.47308734787878f;
+    float fTmp2B = -1.770130769779931f * z;
+    float fC3 = x * fC2 - y * fS2;
+    float fS3 = x * fS2 + y * fC2;
+    // pSH6 was (0.9461746957575601f * z2 - 0.3153915652525201f)
+    // pSH12 was z * (1.865881662950577f * z2 - 1.119528997770346f)
+    float pSH6_val = (0.9461746957575601f * z2 - 0.3153915652525201f);
+    float pSH12_val = z * (1.865881662950577f * z2 - 1.119528997770346f);
+
+
+    current_sh_output[16] = 0.6258357354491763f * fS3;            // pSH16
+    current_sh_output[17] = fTmp2B * fS2;                         // pSH17
+    current_sh_output[18] = fTmp1C * fS1;                         // pSH18
+    current_sh_output[19] = fTmp0D * y;                           // pSH19
+    current_sh_output[20] = (1.984313483298443f * z * pSH12_val - 1.006230589874905f * pSH6_val); // pSH20
+    current_sh_output[21] = fTmp0D * x;                           // pSH21
+    current_sh_output[22] = fTmp1C * fC1;                         // pSH22
+    current_sh_output[23] = fTmp2B * fC2;                         // pSH23
+    current_sh_output[24] = 0.6258357354491763f * fC3;            // pSH24
+    // Degree 4 is max supported by this structure
+}

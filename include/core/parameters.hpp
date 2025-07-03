@@ -54,6 +54,12 @@ namespace gs {
             float newton_secondary_target_downsample_factor = 0.5f; // Downsample factor for KNN GT images
             float newton_lambda_dssim_for_hessian = 0.2f; // DSSIM weight in Hessian calculation
             bool newton_use_l2_for_hessian_L_term = true; // Whether to use L2 or L1 for the non-SSIM part of loss in Hessian
+            // Flags for enabling/disabling specific Newton optimizations
+            bool newton_optimize_means = true;
+            bool newton_optimize_scales = true;
+            bool newton_optimize_rotations = true;
+            bool newton_optimize_opacities = true;
+            bool newton_optimize_shs = true;
         };
 
         struct DatasetConfig {

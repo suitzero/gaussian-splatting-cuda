@@ -31,5 +31,18 @@
   "tv_loss_weight": 10.0,
   "steps_scaler": 1,
   "selective_adam": false,
-  "k_nearest_neighbors_for_cameras": 3
+  "k_nearest_neighbors_for_cameras": 3,
+
+  "use_newton_optimizer": false,
+  "newton_step_scale": 1.0,
+  "newton_damping": 1e-6,
+  "newton_knn_k": 3,
+  "newton_secondary_target_downsample_factor": 0.5,
+  "newton_lambda_dssim_for_hessian": 0.2,
+  "newton_use_l2_for_hessian_L_term": true,
+  "newton_optimize_means": true,
+  "newton_optimize_scales": true,
+  "newton_optimize_rotations": true,
+  "newton_optimize_opacities": true,
+  "newton_optimize_shs": true
 }

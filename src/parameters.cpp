@@ -121,7 +121,21 @@ namespace gs {
                     {"tv_loss_weight", defaults.tv_loss_weight, "Weight for total variation loss"},
                     {"steps_scaler", defaults.steps_scaler, "Scales the training steps and values"},
                     {"sh_degree_interval", defaults.sh_degree_interval, "Interval for increasing SH degree"},
-                    {"selective_adam", defaults.selective_adam, "Selective Adam optimizer flag"}};
+                    {"selective_adam", defaults.selective_adam, "Selective Adam optimizer flag"},
+                    // Newton Optimizer Params
+                    {"use_newton_optimizer", defaults.use_newton_optimizer, "Enable Newton Optimizer"},
+                    {"newton_step_scale", defaults.newton_step_scale, "Newton step scale"},
+                    {"newton_damping", defaults.newton_damping, "Newton damping factor"},
+                    {"newton_knn_k", defaults.newton_knn_k, "Newton K for KNN overshoot"},
+                    {"newton_secondary_target_downsample_factor", defaults.newton_secondary_target_downsample_factor, "Newton secondary target downsample factor"},
+                    {"newton_lambda_dssim_for_hessian", defaults.newton_lambda_dssim_for_hessian, "Newton DSSIM lambda for Hessian"},
+                    {"newton_use_l2_for_hessian_L_term", defaults.newton_use_l2_for_hessian_L_term, "Newton use L2 for Hessian L term"},
+                    {"newton_optimize_means", defaults.newton_optimize_means, "Newton optimize means"},
+                    {"newton_optimize_scales", defaults.newton_optimize_scales, "Newton optimize scales"},
+                    {"newton_optimize_rotations", defaults.newton_optimize_rotations, "Newton optimize rotations"},
+                    {"newton_optimize_opacities", defaults.newton_optimize_opacities, "Newton optimize opacities"},
+                    {"newton_optimize_shs", defaults.newton_optimize_shs, "Newton optimize SHs"}
+                };
 
                 // Check all expected parameters
                 for (const auto& param : expected_params) {
@@ -326,6 +340,46 @@ namespace gs {
             if (json.contains("selective_adam")) {
                 params.selective_adam = json["selective_adam"];
             }
+
+            // Newton Optimizer Parameters
+            if (json.contains("use_newton_optimizer")) {
+                params.use_newton_optimizer = json["use_newton_optimizer"];
+            }
+            if (json.contains("newton_step_scale")) {
+                params.newton_step_scale = json["newton_step_scale"];
+            }
+            if (json.contains("newton_damping")) {
+                params.newton_damping = json["newton_damping"];
+            }
+            if (json.contains("newton_knn_k")) {
+                params.newton_knn_k = json["newton_knn_k"];
+            }
+            if (json.contains("newton_secondary_target_downsample_factor")) {
+                params.newton_secondary_target_downsample_factor = json["newton_secondary_target_downsample_factor"];
+            }
+            if (json.contains("newton_lambda_dssim_for_hessian")) {
+                params.newton_lambda_dssim_for_hessian = json["newton_lambda_dssim_for_hessian"];
+            }
+            if (json.contains("newton_use_l2_for_hessian_L_term")) {
+                params.newton_use_l2_for_hessian_L_term = json["newton_use_l2_for_hessian_L_term"];
+            }
+            // Attribute-specific Newton toggles
+            if (json.contains("newton_optimize_means")) {
+                params.newton_optimize_means = json["newton_optimize_means"];
+            }
+            if (json.contains("newton_optimize_scales")) {
+                params.newton_optimize_scales = json["newton_optimize_scales"];
+            }
+            if (json.contains("newton_optimize_rotations")) {
+                params.newton_optimize_rotations = json["newton_optimize_rotations"];
+            }
+            if (json.contains("newton_optimize_opacities")) {
+                params.newton_optimize_opacities = json["newton_optimize_opacities"];
+            }
+            if (json.contains("newton_optimize_shs")) {
+                params.newton_optimize_shs = json["newton_optimize_shs"];
+            }
+
             return params;
         }
 

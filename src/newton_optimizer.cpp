@@ -640,7 +640,8 @@ void NewtonOptimizer::step(int iteration,
             current_render_output
         );
         if (scale_update.success && scale_update.delta.defined() && scale_update.delta.numel() > 0) {
-            model_.get_scaling().index_add_(0, visible_indices, scale_update.delta);
+            // scale_update.delta is delta_log_s
+            model_.get_raw_scaling().index_add_(0, visible_indices, scale_update.delta);
         }
     }
 
@@ -652,8 +653,28 @@ void NewtonOptimizer::step(int iteration,
             current_render_output
         );
         if (rot_update.success && rot_update.delta.defined() && rot_update.delta.numel() > 0) {
-            // Placeholder: actual rotation update is q_new = delta_q * q_old
-            // model_.get_rotation().index_add_(0, visible_indices, rot_update.delta); // Not for quaternions
+            torch::Tensor q_delta = rot_update.delta; // [N_vis, 4] (w,x,y,z)
+            torch::Tensor q_old_visible = model_.get_raw_rotation().index_select(0, visible_indices).detach(); // [N_vis, 4]
+
+            // Quaternion multiplication: q_new = q_delta * q_old_visible
+            // q_delta = (w_d, x_d, y_d, z_d)
+            // q_old_visible = (w_o, x_o, y_o, z_o)
+            torch::Tensor w_d = q_delta.select(1,0); torch::Tensor x_d = q_delta.select(1,1);
+            torch::Tensor y_d = q_delta.select(1,2); torch::Tensor z_d = q_delta.select(1,3);
+
+            torch::Tensor w_o = q_old_visible.select(1,0); torch::Tensor x_o = q_old_visible.select(1,1);
+            torch::Tensor y_o = q_old_visible.select(1,2); torch::Tensor z_o = q_old_visible.select(1,3);
+
+            torch::Tensor q_new_w = w_d * w_o - x_d * x_o - y_d * y_o - z_d * z_o;
+            torch::Tensor q_new_x = w_d * x_o + x_d * w_o + y_d * z_o - z_d * y_o;
+            torch::Tensor q_new_y = w_d * y_o - x_d * z_o + y_d * w_o + z_d * x_o;
+            torch::Tensor q_new_z = w_d * z_o + x_d * y_o - y_d * x_o + z_d * w_o;
+
+            torch::Tensor q_new_stacked = torch::stack({q_new_w, q_new_x, q_new_y, q_new_z}, /*dim=*/-1);
+            // Normalize the new quaternions
+            torch::Tensor q_new_normalized = torch::nn::functional::normalize(q_new_stacked, torch::nn::functional::NormalizeFuncOptions().dim(1).eps(1e-9));
+
+            model_.get_raw_rotation().index_copy_(0, visible_indices, q_new_normalized);
         }
     }
 
@@ -665,8 +686,8 @@ void NewtonOptimizer::step(int iteration,
             current_render_output
         );
         if (opacity_update.success && opacity_update.delta.defined() && opacity_update.delta.numel() > 0) {
-            // Placeholder: actual update might be in logit space + sigmoid, or handle barriers
-            model_.get_opacity().index_add_(0, visible_indices, opacity_update.delta);
+            // opacity_update.delta is delta_for_logits
+            model_.get_raw_opacity().index_add_(0, visible_indices, opacity_update.delta);
         }
     }
 
@@ -754,32 +775,31 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_scale_updates_ne
     // --- Solve the linear system H_s * Δs = -g_s ---
     // This would be a batch 3x3 solve for each Gaussian.
     // For simplicity, placeholder for delta_s (actual solve needed).
-    torch::Tensor delta_s = torch::zeros_like(g_s);
-    if (g_s.numel() > 0) {
-        // Conceptual:
-        // delta_s = NewtonKernels::batch_solve_3x3_system_kernel_launcher(H_s_packed, g_s, options_.damping);
-        // delta_s = -options_.step_scale * delta_s; // Apply step scale
+    torch::Tensor delta_s = torch::zeros_like(g_s); // This will be delta_log_s
 
-        // Placeholder: simplified update (e.g., gradient descent on scales for testing)
-        // This is NOT the Newton step.
-        delta_s = -options_.step_scale * g_s * 0.01; // Small learning rate for placeholder
+    // The compute_scale_hessian_gradient_components_kernel_launcher is a stub and will leave H_s_packed and g_s as zeros.
+    // So, delta_s will also be zeros after the solve.
+    // The call to the solver:
+    if (num_vis_gaussians > 0) {
+         NewtonKernels::batch_solve_3x3_system_kernel_launcher(
+            num_vis_gaussians,
+            H_s_packed, // Placeholder, currently zeros
+            g_s,        // Placeholder, currently zeros
+            static_cast<float>(options_.damping),
+            delta_s     // Output: delta_log_s
+        );
+        delta_s.mul_(options_.step_scale); // Apply step scale: delta_log_s *= step_scale
+                                           // Note: The solver gives x = -(H+dI)^-1 g.
+                                           // If we want delta = -step * (H+dI)^-1 g, then multiply by step_scale here.
+                                           // The 2x2 solver had step_scale inside. This 3x3 does not.
+        delta_s.nan_to_num_(0.0, 0.0, 0.0);
     }
 
 
-    // TODO: Implement paper's "Scaling solve"
-    // 1. Get current scales: model_.get_scaling().index_select(0, visible_indices)
-    // 2. Compute ∂c/∂s_k, ∂²c/∂s_k² (VERY COMPLEX - requires new CUDA kernels & use of supplement)
-    //    - ∂c/∂s_k = (∂c/∂G_k) * (∂G_k/∂Σ_k) : (∂Σ_k/∂λ_k) * (∂λ_k/∂s_k)
-    //    - Uses opt_params_ref_ for loss parameters, options_ for Newton parameters
-    // 3. Assemble Hessian H_s_k and gradient g_s_k for scales
-    // 4. Project to T_k subspace (optional, from paper)
-    // 5. Solve Δs_k = -H_s_k⁻¹ g_s_k (or for Δλ_k)
-    if (visible_indices.numel() == 0) return AttributeUpdateOutput(torch::empty({0}), false);
-    torch::Tensor current_scales = model_.get_scaling().index_select(0, visible_indices);
-    if (current_scales.numel() > 0) {
-        return AttributeUpdateOutput(torch::zeros_like(current_scales)); // Return zero delta
-    }
-    return AttributeUpdateOutput(torch::empty({0}, model_.get_scaling().options()));
+    // Assuming delta_s is delta_log_s, it can be directly applied to model_._scaling_
+    // The actual update happens in NewtonOptimizer::step using model_.get_raw_scaling().index_add_
+    // or model_._scaling_.index_add_
+    return AttributeUpdateOutput(delta_s, true);
 }
 
 NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_rotation_updates_newton(
@@ -859,24 +879,37 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_rotation_updates
         delta_theta = -options_.step_scale * g_theta * 0.01; // Small learning rate for placeholder
     }
 
-    // The paper states update is Δq_k = [cos(θ_k_update/2), sin(θ_k_update/2) * normalized_r_k]^T
-    // where θ_k_update is our delta_theta.
-    // This delta_theta is the actual angle of rotation for the update.
-    // So, the output 'delta' of this function should represent these delta_thetas.
-    // The application q_new = delta_q * q_old will be handled in the main step() function.
-
-    // TODO: Implement paper's "Rotation solve" (update as Δθ_k around r_k)
-    // 1. Get current rotations: model_.get_rotation().index_select(0, visible_indices)
-    // 2. Compute ∂c/∂θ_k, ∂²c/∂θ_k²
-    // 3. Assemble H_θ_k, g_θ_k
-    // 4. Solve Δθ_k = -H_θ_k⁻¹ g_θ_k
-    if (visible_indices.numel() == 0) return AttributeUpdateOutput(torch::empty({0}), false);
-    // Placeholder delta for θ_k might be [N_vis, 1]
-    torch::Tensor current_rotations = model_.get_rotation().index_select(0, visible_indices);
-     if (current_rotations.numel() > 0) {
-        return AttributeUpdateOutput(torch::zeros({visible_indices.size(0), 1}, current_rotations.options()));
+    // The H_theta and g_theta are currently zeros due to stubbed kernel.
+    // So delta_theta will also be zeros.
+    if (num_vis_gaussians > 0) {
+        NewtonKernels::batch_solve_1x1_system_kernel_launcher(
+            num_vis_gaussians,
+            H_theta, // Placeholder, currently zeros
+            g_theta, // Placeholder, currently zeros
+            static_cast<float>(options_.damping),
+            delta_theta
+        );
+        delta_theta.mul_(options_.step_scale); // delta_theta *= step_scale
+        delta_theta.nan_to_num_(0.0, 0.0, 0.0);
     }
-    return AttributeUpdateOutput(torch::empty({0}, model_.get_rotation().options()));
+
+    // Convert delta_theta (angles) and r_k_vecs (axes) to delta quaternions
+    // delta_q_k = [cos(angle/2), sin(angle/2) * axis_normalized]
+    // r_k_vecs is [N_vis, 3], delta_theta is [N_vis, 1] or [N_vis]
+
+    torch::Tensor delta_quats = torch::zeros({num_vis_gaussians, 4}, tensor_opts_float); // Output: [N_vis, 4]
+
+    if (num_vis_gaussians > 0) {
+        torch::Tensor r_k_normalized = torch::nn::functional::normalize(r_k_vecs, torch::nn::functional::NormalizeFuncOptions().dim(1).eps(1e-9));
+        torch::Tensor half_angles = delta_theta.squeeze(-1) * 0.5f; // Ensure delta_theta is [N_vis] if it was [N_vis,1]
+        torch::Tensor cos_half_angles = torch::cos(half_angles);
+        torch::Tensor sin_half_angles = torch::sin(half_angles);
+
+        delta_quats.select(1, 0) = cos_half_angles; // w component
+        delta_quats.slice(1, 1, 4) = r_k_normalized * sin_half_angles.unsqueeze(-1); // xyz components
+    }
+
+    return AttributeUpdateOutput(delta_quats, true);
 }
 
 NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_opacity_updates_newton(
@@ -965,28 +998,30 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_opacity_updates_
         delta_sigma.nan_to_num_(0.0, 0.0, 0.0);
     }
 
-    // The delta_sigma is an update to sigma_k directly.
-    // The barrier terms in H and g are meant to keep sigma_k within (0,1).
-    // Clamping might still be needed if updates are too large.
-    // delta_sigma = torch::clamp(current_opacities_sigma + delta_sigma, 1e-7f, 1.0f - 1e-7f) - current_opacities_sigma;
+    // The delta_sigma is an update to sigma_k (value in (0,1)) directly.
+    // The barrier terms in H and g are meant to keep sigma_k within (0,1) during the solve.
 
+    // Since model_.get_opacity() returns sigmoided values, but stores logits,
+    // we need to convert the update delta_sigma (which is for sigma in (0,1))
+    // to an update for the logits.
+    // new_sigma = current_opacities_sigma + delta_sigma
+    // new_logit = logit(new_sigma)
+    // delta_for_logits = new_logit - current_logits
+    // current_logits can be obtained by model_.get_raw_opacity().index_select(0, visible_indices)
 
-    // TODO: Implement paper's "Opacity solve" (with log barriers)
-    // 1. Get current opacities: model_.get_opacity().index_select(0, visible_indices)
-    // 2. Compute ∂c/∂σ_k (paper says ∂²c/∂σ_k² = 0)
-    // 3. Assemble H_σ_k, g_σ_k including barrier terms.
-    //    Barrier loss: -alpha_sigma * ( log(σ_k) + log(1-σ_k) ) based on common form, paper has typo?
-    //    Paper: L_local <- L_local - alpha_sigma * (sigma_k + ln(1-sigma_k)) -> this barrier form is unusual.
-    //    Typically: -alpha * (log(x) + log(1-x)). Gradient: -alpha * (1/x - 1/(1-x)). Hessian: -alpha * (-1/x^2 - 1/(1-x)^2)
-    //    Paper's barrier derivatives: -1/σ_k - 1/(1-σ_k) (for grad) and 1/(1-σ_k)^2 - 1/σ_k^2 (for hessian part) - these match -alpha*(log+log) if alpha=1.
-    //    float alpha_sigma = opt_params_ref_.log_barrier_alpha_opacity; // Get from params
-    // 4. Solve Δσ_k = -H_σ_k⁻¹ g_σ_k
-    if (visible_indices.numel() == 0) return AttributeUpdateOutput(torch::empty({0}), false);
-    torch::Tensor current_opacities = model_.get_opacity().index_select(0, visible_indices);
-    if (current_opacities.numel() > 0) {
-        return AttributeUpdateOutput(torch::zeros_like(current_opacities));
-    }
-    return AttributeUpdateOutput(torch::empty({0}, model_.get_opacity().options()));
+    torch::Tensor current_logits = model_.get_raw_opacity().index_select(0, visible_indices).detach();
+    torch::Tensor updated_sigma = current_opacities_sigma + delta_sigma;
+
+    // Clamp updated_sigma to prevent issues with logit function (input must be in (0,1))
+    updated_sigma.clamp_(1e-7f, 1.0f - 1e-7f);
+
+    torch::Tensor updated_logits = torch::logit(updated_sigma, /*eps=*/1e-7f); // Use eps for stability if not already clamped well
+
+    // The actual delta to be applied to the stored logits
+    torch::Tensor delta_for_logits = updated_logits - current_logits;
+    delta_for_logits.nan_to_num_(0.0, 0.0, 0.0); // Final safety for NaNs
+
+    return AttributeUpdateOutput(delta_for_logits, true);
 }
 
 NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_sh_updates_newton(
@@ -1033,34 +1068,47 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_sh_updates_newto
     // For H_ck, if decoupled per channel, it's 3 blocks of [N_vis, sh_coeffs_per_channel, sh_coeffs_per_channel]
     // Or, if solving all SH coeffs together: [N_vis, sh_dim_flat, sh_dim_flat]
     // For simplicity in stub, let's assume we get a flattened gradient and a diagonal Hessian.
-    torch::Tensor H_ck_diag = torch::ones({num_vis_gaussians, sh_dim_flat}, tensor_opts_float); // Placeholder: Identity Hessian
+    torch::Tensor H_ck_diag = torch::zeros({num_vis_gaussians, sh_dim_flat}, tensor_opts_float); // Initialize to zeros
     torch::Tensor g_ck = torch::zeros({num_vis_gaussians, sh_dim_flat}, tensor_opts_float);
 
 
     // Conceptual CUDA kernel calls:
     // 1. Kernel to compute SH basis functions B_k(r_k) for each visible Gaussian.
     //    Output: sh_bases [N_vis, (deg+1)^2]
-    /*
-    torch::Tensor sh_bases = NewtonKernels::compute_sh_bases_kernel_launcher(
-        model_.get_active_sh_degree(), r_k_vecs_normalized);
-    */
+    torch::Tensor sh_bases_values = torch::empty({0}); // Default undefined
+    if (num_vis_gaussians > 0) {
+        sh_bases_values = NewtonKernels::compute_sh_bases_kernel_launcher(
+            model_.get_active_sh_degree(), r_k_vecs_normalized);
+    }
+
 
     // 2. Kernel to compute Jacobian J_sh = ∂c_pixel/∂c_k and then accumulate H_ck_base and g_ck_base.
     //    J_sh_pixel_channel = G_k * σ_k * (Π_alpha_front) * B_k_channel_coeff
     //    Paper: ∂c_R/∂c_{k,R} = sum_{gaussians} G_k σ_k (Π(1-G_jσ_j)) B_{k,R} (this is ∂(final_pixel_R)/∂(sh_coeff_R_for_gaussian_k))
     //    If ∂²c_R/∂c_{k,R}² (direct part) = 0, then Hessian is J_sh^T * (d2L/dc2) * J_sh
-    /*
-    NewtonKernels::compute_sh_hessian_gradient_components_kernel_launcher(
-        render_output.height, render_output.width, render_output.image.size(-1),
-        model_, visible_indices, sh_bases, // Pass evaluated SH bases
-        camera, render_output, // For view info, tile iterators, accumulated alpha etc.
-        loss_derivs.dL_dc,
-        loss_derivs.d2L_dc2_diag,
-        H_ck_diag, // Output (e.g., diagonal of Hessian)
-        g_ck       // Output
-    );
-    */
-    // For now, H_ck_diag and g_ck are zeros/ones.
+    // Note: The actual call to compute_sh_hessian_gradient_components_kernel_launcher needs many more params from model_
+    // For now, this is a simplified call reflecting the stub's current state.
+    // The launcher expects many torch::Tensor arguments for model parts.
+    // We need to pass them correctly if the kernel were fully implemented.
+    // The current stub only zeros H_ck_diag and g_ck, so these details are deferred.
+    if (num_vis_gaussians > 0) {
+        NewtonKernels::compute_sh_hessian_gradient_components_kernel_launcher(
+            render_output.height, render_output.width, static_cast<int>(render_output.image.size(-1)), // C_img
+            static_cast<int>(model_.size()), // P_total
+            model_.get_means(), model_.get_scaling(), model_.get_rotation(), model_.get_opacity(), model_.get_shs(),
+            model_.get_active_sh_degree(),
+            sh_bases_values, // Pass evaluated SH bases
+            camera.world_view_transform().to(device), // view_matrix
+            camera.K().to(device), // K_matrix
+            render_output,
+            visible_indices, // visible_indices from the function argument
+            loss_derivs.dL_dc,
+            loss_derivs.d2L_dc2_diag,
+            H_ck_diag, // Output (e.g., diagonal of Hessian)
+            g_ck       // Output
+        );
+    }
+    // For now, H_ck_diag remains ones and g_ck remains zeros due to stub.
 
 
     // --- Solve the linear system H_ck * Δc_k = -g_ck ---
