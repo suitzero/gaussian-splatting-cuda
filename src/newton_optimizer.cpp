@@ -145,44 +145,110 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
     // If render_output.radii was undefined, radii_for_kernel_tensor remains undefined.
     // get_const_data_ptr will handle undefined tensor by returning nullptr.
 
+    // Define the verbose checker lambda (only if debug_print_shapes is on)
+    std::function<void(const std::string&, const torch::Tensor&, const std::string&)> verbose_tensor_check_lambda;
     if (options_.debug_print_shapes) {
-        // Also check the tensor that will actually be passed for radii
-        auto print_tensor_info_local = [&](const std::string& name, const torch::Tensor& tensor) {
-             if (!tensor.defined()) { std::cout << "[DEBUG] INFO_CHECK " << name << ": UNDEFINED" << std::endl; return; }
-             std::cout << "[DEBUG] INFO_CHECK " << name << ": dtype=" << tensor.scalar_type()
-                       << ", contiguous=" << tensor.is_contiguous()
-                       << ", shape=" << tensor.sizes() << std::endl;
+        verbose_tensor_check_lambda =
+            [](const std::string& name, const torch::Tensor& tensor, const std::string& expected_type_str) {
+            std::cout << "[VERBOSE_CHECK] Tensor: " << name << std::endl;
+            if (!tensor.defined()) {
+                std::cout << "  - Defined: No" << std::endl;
+                return;
+            }
+            std::cout << "  - Defined: Yes" << std::endl;
+            std::cout << "  - Device: " << tensor.device() << std::endl;
+            std::cout << "  - Dtype: " << tensor.scalar_type() << " (Expected: " << expected_type_str << ")" << std::endl;
+            std::cout << "  - Contiguous: " << tensor.is_contiguous() << std::endl;
+            std::cout << "  - Sizes: " << tensor.sizes() << std::endl;
+            std::cout << "  - Numel: " << tensor.numel() << std::endl;
+            try {
+                if (tensor.numel() > 0) {
+                    // Attempt to access data_ptr to see if it crashes here for this specific type
+                    // This is a bit risky as it might crash, but that's what we are debugging.
+                    // We are not actually using the pointer, just testing the call.
+                    if (expected_type_str == "float") tensor.data_ptr<float>();
+                    else if (expected_type_str == "bool") tensor.data_ptr<bool>();
+                    else if (expected_type_str == "int") tensor.data_ptr<int>();
+                    // Add other types if needed
+                    std::cout << "  - data_ptr<" << expected_type_str << "> call: OK (or returned nullptr for empty)" << std::endl;
+                } else {
+                    std::cout << "  - data_ptr<" << expected_type_str << "> call: Skipped (numel is 0)" << std::endl;
+                }
+            } catch (const c10::Error& e) {
+                std::cout << "  - data_ptr<" << expected_type_str << "> call: FAILED (c10::Error): " << e.what() << std::endl;
+            } catch (const std::exception& e) {
+                std::cout << "  - data_ptr<" << expected_type_str << "> call: FAILED (std::exception): " << e.what() << std::endl;
+            } catch (...) {
+                std::cout << "  - data_ptr<" << expected_type_str << "> call: FAILED (unknown exception)" << std::endl;
+            }
         };
-        print_tensor_info_local("radii_for_kernel_tensor", radii_for_kernel_tensor);
+
+        // Call for existing INFO_CHECK tensors (now done by the lambda)
+        verbose_tensor_check_lambda("model_snapshot.get_means()", model_snapshot.get_means(), "float");
+        verbose_tensor_check_lambda("model_snapshot.get_scaling()", model_snapshot.get_scaling(), "float");
+        verbose_tensor_check_lambda("model_snapshot.get_rotation()", model_snapshot.get_rotation(), "float");
+        verbose_tensor_check_lambda("model_snapshot.get_opacity()", model_snapshot.get_opacity(), "float");
+        verbose_tensor_check_lambda("model_snapshot.get_shs()", model_snapshot.get_shs(), "float");
+        verbose_tensor_check_lambda("view_mat_tensor", view_mat_tensor, "float");
+        verbose_tensor_check_lambda("K_matrix", K_matrix, "float");
+        verbose_tensor_check_lambda("cam_pos_tensor", cam_pos_tensor, "float");
+        verbose_tensor_check_lambda("render_output.means2d", render_output.means2d, "float");
+        verbose_tensor_check_lambda("render_output.depths", render_output.depths, "float");
+        verbose_tensor_check_lambda("radii_for_kernel_tensor", radii_for_kernel_tensor, "float"); // After potential cast
+        verbose_tensor_check_lambda("visibility_mask_for_model", visibility_mask_for_model, "bool");
+        verbose_tensor_check_lambda("loss_derivs.dL_dc", loss_derivs.dL_dc, "float");
+        verbose_tensor_check_lambda("loss_derivs.d2L_dc2_diag", loss_derivs.d2L_dc2_diag, "float");
+        verbose_tensor_check_lambda("H_p_output_packed", H_p_output_packed, "float");
+        verbose_tensor_check_lambda("grad_p_output", grad_p_output, "float");
     }
+
+
+    // Prepare arguments for kernel launcher by getting data pointers
+    // We assume that if verbose_tensor_check_lambda didn't throw or log a FAILED for data_ptr,
+    // the call within gs::torch_utils should also be 'safer', though an access violation
+    // might still occur if the tensor metadata is deeply corrupted in a way checks don't catch.
+
+    const float* means_3d_all_ptr = gs::torch_utils::get_const_data_ptr<float>(model_snapshot.get_means(), "model_snapshot.get_means()");
+    const float* scales_all_ptr = gs::torch_utils::get_const_data_ptr<float>(model_snapshot.get_scaling(), "model_snapshot.get_scaling()");
+    const float* rotations_all_ptr = gs::torch_utils::get_const_data_ptr<float>(model_snapshot.get_rotation(), "model_snapshot.get_rotation()");
+    const float* opacities_all_ptr = gs::torch_utils::get_const_data_ptr<float>(model_snapshot.get_opacity(), "model_snapshot.get_opacity()");
+    const float* shs_all_ptr = gs::torch_utils::get_const_data_ptr<float>(model_snapshot.get_shs(), "model_snapshot.get_shs()");
+    const float* view_matrix_ptr = gs::torch_utils::get_const_data_ptr<float>(view_mat_tensor, "view_mat_tensor");
+    const float* K_matrix_ptr = gs::torch_utils::get_const_data_ptr<float>(K_matrix, "K_matrix");
+    const float* cam_pos_world_ptr = gs::torch_utils::get_const_data_ptr<float>(cam_pos_tensor, "cam_pos_tensor");
+    const float* means_2d_render_ptr = gs::torch_utils::get_const_data_ptr<float>(render_output.means2d, "render_output.means2d");
+    const float* depths_render_ptr = gs::torch_utils::get_const_data_ptr<float>(render_output.depths, "render_output.depths");
+    const float* radii_render_ptr = gs::torch_utils::get_const_data_ptr<float>(radii_for_kernel_tensor, "radii_for_kernel_tensor");
+    const bool* visibility_mask_for_model_ptr = gs::torch_utils::get_const_data_ptr<bool>(visibility_mask_for_model, "visibility_mask_for_model");
+    const float* dL_dc_pixelwise_ptr = gs::torch_utils::get_const_data_ptr<float>(loss_derivs.dL_dc, "loss_derivs.dL_dc");
+    const float* d2L_dc2_diag_pixelwise_ptr = gs::torch_utils::get_const_data_ptr<float>(loss_derivs.d2L_dc2_diag, "loss_derivs.d2L_dc2_diag");
+    float* H_p_output_packed_ptr = gs::torch_utils::get_data_ptr<float>(H_p_output_packed, "H_p_output_packed");
+    float* grad_p_output_ptr = gs::torch_utils::get_data_ptr<float>(grad_p_output, "grad_p_output");
+
 
     NewtonKernels::compute_position_hessian_components_kernel_launcher(
         render_output.height, render_output.width, render_output.image.size(-1), // Image: H, W, C
         static_cast<int>(model_snapshot.size()), // Total P Gaussians in model
-        gs::torch_utils::get_const_data_ptr<float>(model_snapshot.get_means()),
-        gs::torch_utils::get_const_data_ptr<float>(model_snapshot.get_scaling()),
-        gs::torch_utils::get_const_data_ptr<float>(model_snapshot.get_rotation()),
-        gs::torch_utils::get_const_data_ptr<float>(model_snapshot.get_opacity()),
-        gs::torch_utils::get_const_data_ptr<float>(model_snapshot.get_shs()),
+        means_3d_all_ptr,
+        scales_all_ptr,
+        rotations_all_ptr,
+        opacities_all_ptr,
+        shs_all_ptr,
         model_snapshot.get_active_sh_degree(),
         static_cast<int>(model_snapshot.get_shs().size(1)), // sh_coeffs_dim
-        gs::torch_utils::get_const_data_ptr<float>(view_mat_tensor),
-        gs::torch_utils::get_const_data_ptr<float>(K_matrix), // Was projection_matrix_for_jacobian
-        gs::torch_utils::get_const_data_ptr<float>(cam_pos_tensor),
-        // Data from RenderOutput (already for a culled set of Gaussians)
-        gs::torch_utils::get_const_data_ptr<float>(render_output.means2d), // Assuming means2d and depths are float
-        gs::torch_utils::get_const_data_ptr<float>(render_output.depths),
-        gs::torch_utils::get_const_data_ptr<float>(radii_for_kernel_tensor), // Use the potentially casted tensor
-        // How to map render_output's Gaussians to original model indices or use visibility_mask_for_model
-        // is critical for the kernel. The ranks tensor (mapping render_output indices to original model indices) is needed here.
-        // Parameter for visibility_indices_in_render_output removed from kernel launcher.
+        view_matrix_ptr,
+        K_matrix_ptr,
+        cam_pos_world_ptr,
+        means_2d_render_ptr,
+        depths_render_ptr,
+        radii_render_ptr,
         static_cast<int>(render_output.means2d.defined() ? render_output.means2d.size(0) : 0), // P_render
-        gs::torch_utils::get_const_data_ptr<bool>(visibility_mask_for_model), // Mask on *all* model Gaussians
-        gs::torch_utils::get_const_data_ptr<float>(loss_derivs.dL_dc),
-        gs::torch_utils::get_const_data_ptr<float>(loss_derivs.d2L_dc2_diag),
+        visibility_mask_for_model_ptr,
+        dL_dc_pixelwise_ptr,
+        d2L_dc2_diag_pixelwise_ptr,
         num_visible_gaussians_in_total_model, // Number of Gaussians to produce output for
-        gs::torch_utils::get_data_ptr<float>(H_p_output_packed),
-        gs::torch_utils::get_data_ptr<float>(grad_p_output)
+        H_p_output_packed_ptr,
+        grad_p_output_ptr
     );
 
     return {H_p_output_packed, grad_p_output};
