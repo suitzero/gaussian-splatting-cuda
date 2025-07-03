@@ -134,5 +134,45 @@ void batch_solve_3x3_system_kernel_launcher(
     torch::Tensor& out_delta_s       // [N_vis, 3]
 );
 
+// --- Launchers for Rotation Optimization (Placeholders) ---
+
+// Computes Hessian and gradient components for rotation angle theta_k
+void compute_rotation_hessian_gradient_components_kernel_launcher(
+    // Image dimensions
+    int H_img, int W_img, int C_img,
+    // Model data
+    int P_total,
+    const torch::Tensor& means_all,
+    const torch::Tensor& scales_all,
+    const torch::Tensor& rotations_all,
+    const torch::Tensor& opacities_all,
+    const torch::Tensor& shs_all,
+    int sh_degree,
+    // Camera & View related
+    const torch::Tensor& view_matrix,   // World to Camera
+    const torch::Tensor& K_matrix,
+    const torch::Tensor& cam_pos_world,
+    const torch::Tensor& r_k_vecs,      // [N_vis, 3] view vectors (rotation axes)
+    // Render output (if needed for tile iterators, etc.)
+    const gs::RenderOutput& render_output,
+    // Visibility
+    const torch::Tensor& visible_indices, // [N_vis]
+    // Loss derivatives
+    const torch::Tensor& dL_dc_pixelwise,
+    const torch::Tensor& d2L_dc2_diag_pixelwise,
+    // Output arrays (for visible Gaussians)
+    torch::Tensor& out_H_theta, // [N_vis, 1] (scalar Hessian for angle theta_k)
+    torch::Tensor& out_g_theta  // [N_vis, 1] (scalar gradient for angle theta_k)
+);
+
+// Solves batch 1x1 linear systems H_theta * delta_theta = -g_theta
+void batch_solve_1x1_system_kernel_launcher(
+    int num_systems,
+    const torch::Tensor& H_theta, // [N_vis, 1] or [N_vis]
+    const torch::Tensor& g_theta, // [N_vis, 1] or [N_vis]
+    float damping,
+    torch::Tensor& out_delta_theta // [N_vis, 1] or [N_vis]
+);
+
 
 } // namespace NewtonKernels

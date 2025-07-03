@@ -720,7 +720,83 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_rotation_updates
     const Camera& camera,
     const gs::RenderOutput& render_output) {
 
-    if (options_.debug_print_shapes) std::cout << "[NewtonOpt] STUB: compute_rotation_updates_newton called." << std::endl;
+    if (options_.debug_print_shapes) std::cout << "[NewtonOpt] STUB: compute_rotation_updates_newton called for " << visible_indices.numel() << " Gaussians." << std::endl;
+
+    if (visible_indices.numel() == 0) {
+        return AttributeUpdateOutput(torch::empty({0}, model_.get_rotation().options().dtype(torch::kFloat).device(model_.get_rotation().device())), true); // Return empty delta if no visible gaussians
+    }
+
+    // --- Get necessary data ---
+    const torch::Tensor current_rotations_quat = model_.get_rotation().index_select(0, visible_indices).detach(); // [N_vis, 4]
+    const torch::Tensor current_means = model_.get_means().index_select(0, visible_indices).detach(); // Needed for r_k
+    // Other model params (scales, opacity, SHs) might be needed for full ∂c/∂θ_k
+
+    int num_vis_gaussians = static_cast<int>(visible_indices.numel());
+    auto tensor_opts_float = current_rotations_quat.options(); // Should be float
+
+    // Paper parameterizes rotation by an angle θ_k around axis r_k (view vector)
+    // r_k = p_k - C_w (world space vector from camera center to Gaussian mean)
+    // This r_k needs to be computed for each visible Gaussian.
+    // cam_pos_world can be obtained similarly to how it's done in position optimization.
+    torch::Tensor view_mat_tensor = camera.world_view_transform().to(tensor_opts_float.device()).contiguous();
+    torch::Tensor view_mat_2d = view_mat_tensor.select(0,0);
+    torch::Tensor R_wc_2d = view_mat_2d.slice(0,0,3).slice(1,0,3);
+    torch::Tensor t_wc_2d = view_mat_2d.slice(0,0,3).slice(1,3,4);
+    torch::Tensor cam_pos_world = -torch::matmul(R_wc_2d.t(), t_wc_2d).squeeze(); // [3]
+
+    torch::Tensor r_k_vecs = current_means - cam_pos_world.unsqueeze(0); // [N_vis, 3]
+    // r_k should be normalized, but paper might use unnormalized in some places for axis.
+    // The axis for Δq_k is r_k (normalized).
+
+    // --- Placeholder outputs from conceptual CUDA kernels ---
+    // H_theta_k : [num_vis_gaussians, 1] (scalar Hessian for angle theta_k)
+    // g_theta_k : [num_vis_gaussians, 1] (scalar gradient w.r.t. theta_k)
+    torch::Tensor H_theta = torch::zeros({num_vis_gaussians, 1}, tensor_opts_float);
+    torch::Tensor g_theta = torch::zeros({num_vis_gaussians, 1}, tensor_opts_float);
+
+    // Conceptual kernel call to compute per-Gaussian Hessian and gradient for rotation angle theta_k
+    // This kernel would be very complex:
+    // - For each Gaussian, determine r_k.
+    // - Compute ∂c/∂θ_k and ∂²c/∂θ_k² (paper: (∂c/∂G_k)*(∂G_k/∂Σ_k)*(∂Σ_k/∂θ_k) and its second derivative).
+    //   This involves derivatives of 2D covariance Σ_k w.r.t. θ_k.
+    // - Sum contributions over pixels using loss_derivs.dL_dc and loss_derivs.d2L_dc2_diag.
+    /*
+    NewtonKernels::compute_rotation_hessian_gradient_components_kernel_launcher(
+        render_output.height, render_output.width, render_output.image.size(-1),
+        model_, // or specific tensors: means, scales, rotations, opacities, shs
+        visible_indices,
+        r_k_vecs, // Axis of rotation for each Gaussian
+        primary_camera, // For full view, projection matrices if needed by ∂Σ_k/∂θ_k
+        render_output,
+        loss_derivs.dL_dc,
+        loss_derivs.d2L_dc2_diag,
+        H_theta, // Output
+        g_theta  // Output
+    );
+    */
+    // For now, H_theta and g_theta are zeros.
+
+    // --- Solve the linear system H_theta * Δtheta = -g_theta ---
+    // This is a batch 1x1 solve: Δtheta = -g_theta / H_theta
+    torch::Tensor delta_theta = torch::zeros_like(g_theta);
+    if (g_theta.numel() > 0) {
+        // Conceptual:
+        // delta_theta = NewtonKernels::batch_solve_1x1_system_kernel_launcher(H_theta, g_theta, options_.damping);
+        // delta_theta = -options_.step_scale * delta_theta; // Apply step scale
+
+        // Placeholder: simplified update (e.g., gradient descent on theta for testing)
+        // This is NOT the Newton step.
+        // H_theta would need to be regularized (H_theta + damping).
+        // delta_theta = -options_.step_scale * g_theta / (H_theta.abs().clamp_min(1e-6) + options_.damping);
+        delta_theta = -options_.step_scale * g_theta * 0.01; // Small learning rate for placeholder
+    }
+
+    // The paper states update is Δq_k = [cos(θ_k_update/2), sin(θ_k_update/2) * normalized_r_k]^T
+    // where θ_k_update is our delta_theta.
+    // This delta_theta is the actual angle of rotation for the update.
+    // So, the output 'delta' of this function should represent these delta_thetas.
+    // The application q_new = delta_q * q_old will be handled in the main step() function.
+
     // TODO: Implement paper's "Rotation solve" (update as Δθ_k around r_k)
     // 1. Get current rotations: model_.get_rotation().index_select(0, visible_indices)
     // 2. Compute ∂c/∂θ_k, ∂²c/∂θ_k²
