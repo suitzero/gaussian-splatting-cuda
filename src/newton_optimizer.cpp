@@ -631,13 +631,13 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_scale_updates_ne
     }
 
     // --- Get necessary data ---
-    const torch::Tensor current_scales = model_.get_scaling().index_select(0, visible_indices).detach();
+    const torch::Tensor current_scales_for_opt = model_.get_scaling().index_select(0, visible_indices).detach(); // Renamed
     const torch::Tensor current_rotations = model_.get_rotation().index_select(0, visible_indices).detach();
     const torch::Tensor current_means = model_.get_means().index_select(0, visible_indices).detach();
     // Other model params like opacity, SHs might be needed if ∂c/∂s_k depends on them for full color C.
 
     int num_vis_gaussians = static_cast<int>(visible_indices.numel());
-    auto tensor_opts_float = current_scales.options();
+    auto tensor_opts_float = current_scales_for_opt.options(); // Use renamed variable
 
     // --- Placeholder outputs from conceptual CUDA kernels ---
     // These would compute ∂c/∂s_k and ∂²c/∂s_k² per pixel, then sum over pixels.

@@ -2,6 +2,7 @@
 #pragma once
 #include <torch/torch.h>
 #include "core/torch_utils.hpp" // For gs::torch_utils like get_data_ptr
+#include "core/rasterizer.hpp" // For gs::RenderOutput
 
 namespace NewtonKernels {
 
