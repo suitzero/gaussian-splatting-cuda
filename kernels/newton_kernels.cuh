@@ -233,7 +233,7 @@ void compute_sh_hessian_gradient_components_kernel_launcher(
     const torch::Tensor& sh_bases_values, // Precomputed from compute_sh_bases_kernel_launcher [N_vis, (deg+1)^2]
     // Camera
     const torch::Tensor& view_matrix,
-    const torch::Tensor& K_matrix,
+    const torch::Tensor& proj_param_for_sh_hess, //13 Renamed from K_matrix for debugging C2660
     // Render output (for tile iterators, accumulated alpha etc.)
     const gs::RenderOutput& render_output,
     // Visibility

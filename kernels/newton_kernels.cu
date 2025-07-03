@@ -1046,7 +1046,7 @@ void NewtonKernels::compute_sh_hessian_gradient_components_kernel_launcher(
     int sh_degree,
     const torch::Tensor& sh_bases_values,
     const torch::Tensor& view_matrix,
-    const torch::Tensor& K_matrix,
+    const torch::Tensor& proj_param_for_sh_hess, // Renamed from K_matrix
     const gs::RenderOutput& render_output,
     const torch::Tensor& visible_indices,
     const torch::Tensor& dL_dc_pixelwise,
@@ -1054,7 +1054,6 @@ void NewtonKernels::compute_sh_hessian_gradient_components_kernel_launcher(
     torch::Tensor& out_H_ck_diag,
     torch::Tensor& out_g_ck
 ) {
-    if (out_H_ck_diag.defined()) out_H_ck_diag.zero_();
-    if (out_g_ck.defined()) out_g_ck.zero_();
+    // Stub - body intentionally empty for debugging
 }
 } // namespace NewtonKernels
