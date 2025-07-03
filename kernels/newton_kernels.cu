@@ -64,6 +64,10 @@ __global__ void compute_position_hessian_components_kernel(
     // for mapping render output data.
     const int* output_index_map // [P_total], value is output slot or -1 if not visible
 ) {
+    if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+        printf("CUDA KERNEL compute_position_hessian_components_kernel started. P_total: %d, num_output_gaussians: %d\n", P_total, num_output_gaussians);
+    }
+
     int p_idx_total = blockIdx.x * blockDim.x + threadIdx.x; // Iterate over all Gaussians in model
 
     if (p_idx_total >= P_total) return;
@@ -361,7 +365,42 @@ void NewtonKernels::compute_position_hessian_components_kernel_launcher(
     // AT_ASSERTM(current_out_idx == num_output_gaussians, "Mismatch in visible count for output_index_map");
 
     torch::Tensor output_index_map_tensor = torch::tensor(output_index_map_cpu, torch::kInt).to(torch::kCUDA);
-    const int* output_index_map_gpu = gs::torch_utils::get_const_data_ptr<int>(output_index_map_tensor);
+
+    // Verbose check for output_index_map_tensor
+    // This print block should be active for debugging this specific issue.
+    // In a real scenario, options_.debug_print_shapes would be passed down or checked globally.
+    {
+        const std::string name = "output_index_map_tensor_in_launcher";
+        const torch::Tensor& tensor = output_index_map_tensor;
+        const std::string expected_type_str = "int";
+        std::cout << "[VERBOSE_CHECK_LAUNCHER] Tensor: " << name << std::endl;
+        if (!tensor.defined()) {
+            std::cout << "  - Defined: No" << std::endl;
+        } else {
+            std::cout << "  - Defined: Yes" << std::endl;
+            std::cout << "  - Device: " << tensor.device() << std::endl;
+            std::cout << "  - Dtype: " << tensor.scalar_type() << " (Expected: " << expected_type_str << ")" << std::endl;
+            std::cout << "  - Contiguous: " << tensor.is_contiguous() << std::endl;
+            std::cout << "  - Sizes: " << tensor.sizes() << std::endl;
+            std::cout << "  - Numel: " << tensor.numel() << std::endl;
+            try {
+                if (tensor.numel() > 0) {
+                    tensor.data_ptr<int>(); // Test call
+                    std::cout << "  - data_ptr<" << expected_type_str << "> call: OK (or returned nullptr for empty)" << std::endl;
+                } else {
+                    std::cout << "  - data_ptr<" << expected_type_str << "> call: Skipped (numel is 0)" << std::endl;
+                }
+            } catch (const c10::Error& e) {
+                std::cout << "  - data_ptr<" << expected_type_str << "> call: FAILED (c10::Error): " << e.what_without_backtrace() << std::endl;
+            } catch (const std::exception& e) {
+                std::cout << "  - data_ptr<" << expected_type_str << "> call: FAILED (std::exception): " << e.what() << std::endl;
+            } catch (...) {
+                std::cout << "  - data_ptr<" << expected_type_str << "> call: FAILED (unknown exception)" << std::endl;
+            }
+        }
+    }
+
+    const int* output_index_map_gpu = gs::torch_utils::get_const_data_ptr<int>(output_index_map_tensor, "output_index_map_tensor_in_launcher");
 
 
     compute_position_hessian_components_kernel<<<GET_BLOCKS(P_total), CUDA_NUM_THREADS>>>(
