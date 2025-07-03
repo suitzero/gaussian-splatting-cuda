@@ -80,23 +80,34 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
                   << " strides: " << t_wc.contiguous().strides()
                   << " contiguous: " << t_wc.contiguous().is_contiguous() << std::endl;
 
-        // Dtype checks
-        std::cout << "[DEBUG] DTYPE_CHECK model_snapshot.get_means(): " << model_snapshot.get_means().scalar_type() << std::endl;
-        std::cout << "[DEBUG] DTYPE_CHECK model_snapshot.get_scaling(): " << model_snapshot.get_scaling().scalar_type() << std::endl;
-        std::cout << "[DEBUG] DTYPE_CHECK model_snapshot.get_rotation(): " << model_snapshot.get_rotation().scalar_type() << std::endl;
-        std::cout << "[DEBUG] DTYPE_CHECK model_snapshot.get_opacity(): " << model_snapshot.get_opacity().scalar_type() << std::endl;
-        std::cout << "[DEBUG] DTYPE_CHECK model_snapshot.get_shs(): " << model_snapshot.get_shs().scalar_type() << std::endl;
-        std::cout << "[DEBUG] DTYPE_CHECK view_mat_tensor: " << view_mat_tensor.scalar_type() << std::endl;
-        std::cout << "[DEBUG] DTYPE_CHECK K_matrix: " << K_matrix.scalar_type() << std::endl;
-        // cam_pos_tensor is defined after this block, will check before passing to kernel launcher
-        if (render_output.means2d.defined()) std::cout << "[DEBUG] DTYPE_CHECK render_output.means2d: " << render_output.means2d.scalar_type() << std::endl; else std::cout << "[DEBUG] DTYPE_CHECK render_output.means2d: UNDEFINED" << std::endl;
-        if (render_output.depths.defined()) std::cout << "[DEBUG] DTYPE_CHECK render_output.depths: " << render_output.depths.scalar_type() << std::endl; else std::cout << "[DEBUG] DTYPE_CHECK render_output.depths: UNDEFINED" << std::endl;
-        if (render_output.radii.defined()) std::cout << "[DEBUG] DTYPE_CHECK render_output.radii: " << render_output.radii.scalar_type() << std::endl; else std::cout << "[DEBUG] DTYPE_CHECK render_output.radii: UNDEFINED" << std::endl;
-        if (loss_derivs.dL_dc.defined()) std::cout << "[DEBUG] DTYPE_CHECK loss_derivs.dL_dc: " << loss_derivs.dL_dc.scalar_type() << std::endl; else std::cout << "[DEBUG] DTYPE_CHECK loss_derivs.dL_dc: UNDEFINED" << std::endl;
-        if (loss_derivs.d2L_dc2_diag.defined()) std::cout << "[DEBUG] DTYPE_CHECK loss_derivs.d2L_dc2_diag: " << loss_derivs.d2L_dc2_diag.scalar_type() << std::endl; else std::cout << "[DEBUG] DTYPE_CHECK loss_derivs.d2L_dc2_diag: UNDEFINED" << std::endl;
-        std::cout << "[DEBUG] DTYPE_CHECK H_p_output_packed: " << H_p_output_packed.scalar_type() << std::endl;
-        std::cout << "[DEBUG] DTYPE_CHECK grad_p_output: " << grad_p_output.scalar_type() << std::endl;
-        // visibility_mask_for_model is bool, not checked for float
+        // Dtype and Contiguity checks
+        auto print_tensor_info = [&](const std::string& name, const torch::Tensor& tensor) {
+            if (!tensor.defined()) {
+                std::cout << "[DEBUG] INFO_CHECK " << name << ": UNDEFINED" << std::endl;
+                return;
+            }
+            std::cout << "[DEBUG] INFO_CHECK " << name << ": dtype=" << tensor.scalar_type()
+                      << ", contiguous=" << tensor.is_contiguous()
+                      << ", shape=" << tensor.sizes() << std::endl;
+        };
+
+        print_tensor_info("model_snapshot.get_means()", model_snapshot.get_means());
+        print_tensor_info("model_snapshot.get_scaling()", model_snapshot.get_scaling());
+        print_tensor_info("model_snapshot.get_rotation()", model_snapshot.get_rotation());
+        print_tensor_info("model_snapshot.get_opacity()", model_snapshot.get_opacity());
+        print_tensor_info("model_snapshot.get_shs()", model_snapshot.get_shs());
+        print_tensor_info("view_mat_tensor", view_mat_tensor);
+        print_tensor_info("K_matrix", K_matrix);
+        // cam_pos_tensor check will be after its definition
+        print_tensor_info("render_output.means2d", render_output.means2d);
+        print_tensor_info("render_output.depths", render_output.depths);
+        print_tensor_info("render_output.radii (original)", render_output.radii); // Check original radii
+        print_tensor_info("loss_derivs.dL_dc", loss_derivs.dL_dc);
+        print_tensor_info("loss_derivs.d2L_dc2_diag", loss_derivs.d2L_dc2_diag);
+        print_tensor_info("H_p_output_packed", H_p_output_packed);
+        print_tensor_info("grad_p_output", grad_p_output);
+        // visibility_mask_for_model is bool, get_const_data_ptr<bool> will check its contiguity.
+        print_tensor_info("visibility_mask_for_model", visibility_mask_for_model);
     }
 
     // Transpose the inner two dimensions for matrix transpose, robust to batches.
@@ -112,7 +123,10 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
     // `render_output.visibility_filter` could be a boolean mask on the *culled* set from rasterizer.
 
     if (options_.debug_print_shapes) {
-        std::cout << "[DEBUG] DTYPE_CHECK cam_pos_tensor: " << cam_pos_tensor.scalar_type() << std::endl;
+        // Check cam_pos_tensor after its definition and potential squeeze
+        std::cout << "[DEBUG] INFO_CHECK cam_pos_tensor: dtype=" << cam_pos_tensor.scalar_type()
+                  << ", contiguous=" << cam_pos_tensor.is_contiguous()
+                  << ", shape=" << cam_pos_tensor.sizes() << std::endl;
     }
 
     // Handle render_output.radii dtype
@@ -129,6 +143,17 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
     }
     // If render_output.radii was undefined, radii_for_kernel_tensor remains undefined.
     // get_const_data_ptr will handle undefined tensor by returning nullptr.
+
+    if (options_.debug_print_shapes) {
+        // Also check the tensor that will actually be passed for radii
+        auto print_tensor_info_local = [&](const std::string& name, const torch::Tensor& tensor) {
+             if (!tensor.defined()) { std::cout << "[DEBUG] INFO_CHECK " << name << ": UNDEFINED" << std::endl; return; }
+             std::cout << "[DEBUG] INFO_CHECK " << name << ": dtype=" << tensor.scalar_type()
+                       << ", contiguous=" << tensor.is_contiguous()
+                       << ", shape=" << tensor.sizes() << std::endl;
+        };
+        print_tensor_info_local("radii_for_kernel_tensor", radii_for_kernel_tensor);
+    }
 
     NewtonKernels::compute_position_hessian_components_kernel_launcher(
         render_output.height, render_output.width, render_output.image.size(-1), // Image: H, W, C
