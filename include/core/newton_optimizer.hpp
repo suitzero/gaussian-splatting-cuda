@@ -34,7 +34,7 @@ public:
 
         // For L2 loss part in Hessian computation (as per paper)
         bool use_l2_for_hessian_L_term = true;
-        bool debug_print_shapes = false;         // Enable debug prints for tensor shapes
+        bool debug_print_shapes = false;         // Defaulted to false now
     };
 
     NewtonOptimizer(SplatData& splat_data,

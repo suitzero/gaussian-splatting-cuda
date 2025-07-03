@@ -62,9 +62,10 @@ __global__ void compute_position_hessian_components_kernel(
     // This map should be precomputed on CPU and passed if outputs are dense.
     // If visibility_indices_in_render_output is not null, it might serve a similar purpose
     // for mapping render output data.
-    const int* output_index_map // [P_total], value is output slot or -1 if not visible
+    const int* output_index_map, // [P_total], value is output slot or -1 if not visible
+    bool debug_prints_enabled
 ) {
-    if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+    if (debug_prints_enabled && threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
         printf("CUDA KERNEL compute_position_hessian_components_kernel started. P_total: %d, num_output_gaussians: %d\n", P_total, num_output_gaussians);
     }
 
@@ -343,7 +344,8 @@ void NewtonKernels::compute_position_hessian_components_kernel_launcher(
     const torch::Tensor& visibility_mask_for_model_tensor, // Changed from const bool*
     const float* dL_dc_pixelwise, const float* d2L_dc2_diag_pixelwise,
     int num_output_gaussians,
-    float* H_p_output_packed, float* grad_p_output
+    float* H_p_output_packed, float* grad_p_output,
+    bool debug_prints_enabled // Added new parameter
 ) {
     // Precompute output_index_map on CPU/GPU
     // output_index_map: array of size P_total. output_index_map[i] is the dense output index for Gaussian i, or -1.
@@ -374,9 +376,7 @@ void NewtonKernels::compute_position_hessian_components_kernel_launcher(
     torch::Tensor output_index_map_tensor = torch::tensor(output_index_map_cpu, torch::kInt).to(torch::kCUDA);
 
     // Verbose check for output_index_map_tensor
-    // This print block should be active for debugging this specific issue.
-    // In a real scenario, options_.debug_print_shapes would be passed down or checked globally.
-    {
+    if (debug_prints_enabled) {
         const std::string name = "output_index_map_tensor_in_launcher";
         const torch::Tensor& tensor = output_index_map_tensor;
         const std::string expected_type_str = "int";
@@ -418,7 +418,8 @@ void NewtonKernels::compute_position_hessian_components_kernel_launcher(
         means_2d_render, depths_render, radii_render, /* visibility_indices_in_render_output REMOVED */ P_render,
         visibility_mask_gpu_ptr, dL_dc_pixelwise, d2L_dc2_diag_pixelwise, // Use GPU pointer
         num_output_gaussians, H_p_output_packed, grad_p_output,
-        output_index_map_gpu // Pass the map
+        output_index_map_gpu, // Pass the map
+        debug_prints_enabled // Pass the flag to the kernel
     );
     CUDA_CHECK(cudaGetLastError());
 }
