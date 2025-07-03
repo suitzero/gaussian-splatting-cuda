@@ -934,13 +934,13 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_sh_updates_newto
     }
 
     // --- Get necessary data ---
-    const torch::Tensor current_shs = model_.get_shs().index_select(0, visible_indices).detach(); // [N_vis, (deg+1)^2, 3]
+    const torch::Tensor current_shs_for_opt = model_.get_shs().index_select(0, visible_indices).detach(); // [N_vis, (deg+1)^2, 3]
     const torch::Tensor current_means = model_.get_means().index_select(0, visible_indices).detach(); // For r_k
 
     int num_vis_gaussians = static_cast<int>(visible_indices.numel());
-    int sh_dim_flat = static_cast<int>(current_shs.size(1) * current_shs.size(2)); // (deg+1)^2 * 3
-    auto tensor_opts_float = current_shs.options();
-    auto device = current_shs.device();
+    int sh_dim_flat = static_cast<int>(current_shs_for_opt.size(1) * current_shs_for_opt.size(2)); // (deg+1)^2 * 3
+    auto tensor_opts_float = current_shs_for_opt.options();
+    auto device = current_shs_for_opt.device();
 
     // Compute view directions r_k = p_k - C_w
     torch::Tensor view_mat_tensor = camera.world_view_transform().to(tensor_opts_float.device()).contiguous();
@@ -1005,7 +1005,7 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_sh_updates_newto
     }
 
     // Reshape delta_shs_flat [N_vis, sh_dim_flat] back to [N_vis, (deg+1)^2, 3]
-    torch::Tensor delta_shs = delta_shs_flat.reshape(current_shs.sizes());
+    torch::Tensor delta_shs = delta_shs_flat.reshape(current_shs_for_opt.sizes());
 
 
     // TODO: Implement paper's "Color solve"
