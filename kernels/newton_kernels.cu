@@ -409,12 +409,14 @@ void NewtonKernels::compute_position_hessian_components_kernel_launcher(
 
     const int* output_index_map_gpu = gs::torch_utils::get_const_data_ptr<int>(output_index_map_tensor, "output_index_map_tensor_in_launcher");
 
+    // Get the GPU pointer for the visibility_mask_for_model_tensor to pass to the CUDA kernel
+    const bool* visibility_mask_gpu_ptr = gs::torch_utils::get_const_data_ptr<bool>(visibility_mask_for_model_tensor, "visibility_mask_for_model_tensor_for_kernel");
 
     compute_position_hessian_components_kernel<<<GET_BLOCKS(P_total), CUDA_NUM_THREADS>>>(
         H_img, W_img, C_img, P_total, means_3d_all, scales_all, rotations_all, opacities_all,
         shs_all, sh_degree, sh_coeffs_dim, view_matrix, projection_matrix_for_jacobian, cam_pos_world,
         means_2d_render, depths_render, radii_render, /* visibility_indices_in_render_output REMOVED */ P_render,
-        visibility_mask_for_model, dL_dc_pixelwise, d2L_dc2_diag_pixelwise,
+        visibility_mask_gpu_ptr, dL_dc_pixelwise, d2L_dc2_diag_pixelwise, // Use GPU pointer
         num_output_gaussians, H_p_output_packed, grad_p_output,
         output_index_map_gpu // Pass the map
     );
