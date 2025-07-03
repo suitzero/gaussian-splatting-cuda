@@ -817,7 +817,92 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_opacity_updates_
     const Camera& camera,
     const gs::RenderOutput& render_output) {
 
-    if (options_.debug_print_shapes) std::cout << "[NewtonOpt] STUB: compute_opacity_updates_newton called." << std::endl;
+    if (options_.debug_print_shapes) std::cout << "[NewtonOpt] STUB: compute_opacity_updates_newton called for " << visible_indices.numel() << " Gaussians." << std::endl;
+
+    if (visible_indices.numel() == 0) {
+        return AttributeUpdateOutput(torch::empty({0}, model_.get_opacity().options()), true);
+    }
+
+    // --- Get necessary data & parameters ---
+    // Note: get_opacity() applies sigmoid. For barrier terms, we need raw σ_k in (0,1).
+    // The paper's barrier derivatives are in terms of σ_k, not logit(σ_k).
+    // We should use the direct output of get_opacity() which is already sigmoided.
+    const torch::Tensor current_opacities_sigma = model_.get_opacity().index_select(0, visible_indices).detach(); // [N_vis] (already in range [0,1])
+
+    int num_vis_gaussians = static_cast<int>(visible_indices.numel());
+    auto tensor_opts_float = current_opacities_sigma.options();
+    auto device = current_opacities_sigma.device();
+
+    // Barrier parameters (alpha_sigma from paper, though paper's derivatives don't show it explicitly)
+    // Assuming opt_params_ref_.log_barrier_alpha_opacity is the alpha_sigma.
+    // If the paper's given derivatives for barrier already include alpha, then we don't multiply again.
+    // The paper states: "Hessian and gradient w.r.t. L^t should also incorporate barrier loss i.e., -1/σ_k - 1/(1-σ_k) and 1/(1-σ_k)^2 - 1/σ_k^2."
+    // This implies these ARE the additions to g_L and H_L respectively.
+    float alpha_sigma = 1.0f; // Default if not in params, or assume it's baked into paper's derivative forms.
+    // Example: if (opt_params_ref_.defined_log_barrier_alpha_opacity) alpha_sigma = opt_params_ref_.log_barrier_alpha_opacity;
+
+
+    // --- Calculate derivatives of Log Barrier terms ---
+    // Ensure opacities are clamped slightly away from 0 and 1 for barrier stability
+    torch::Tensor sigma_k = current_opacities_sigma.clamp(1e-7f, 1.0f - 1e-7f);
+    torch::Tensor g_barrier = -(1.0f / sigma_k + 1.0f / (1.0f - sigma_k)); // Paper's g_barrier term [N_vis]
+    torch::Tensor H_barrier = 1.0f / torch::pow(1.0f - sigma_k, 2) - 1.0f / torch::pow(sigma_k, 2); // Paper's H_barrier term [N_vis]
+    // If alpha_sigma is a separate multiplier for the barrier *loss term itself*:
+    // g_barrier *= alpha_sigma; H_barrier *= alpha_sigma; // (This depends on precise definition)
+
+    // --- Placeholder for base Hessian and Gradient from color terms ---
+    // H_sigma_base_k : [num_vis_gaussians, 1] (scalar Hessian for opacity sigma_k from color rendering)
+    // g_sigma_base_k : [num_vis_gaussians, 1] (scalar gradient w.r.t. sigma_k from color rendering)
+    torch::Tensor H_sigma_base = torch::zeros({num_vis_gaussians}, tensor_opts_float); // scalar, so [N_vis]
+    torch::Tensor g_sigma_base = torch::zeros({num_vis_gaussians}, tensor_opts_float); // scalar, so [N_vis]
+
+    // Conceptual CUDA kernel calls:
+    // 1. Kernel to compute dc_dopacity = ∂c/∂σ_k for each visible Gaussian & affected pixel.
+    //    Paper: ∂c/∂σ_k = G_k (Π(1-α_j)) (c_gauss_k - C_contrib_behind)
+    //    Paper also states ∂²c/∂σ_k² = 0. This simplifies H_sigma_base.
+    //    This dc_dopacity would be [N_vis, Num_pixels_affected_by_k, C_channels]
+    //    For now, this is a major missing piece.
+    /*
+    torch::Tensor dc_dopacity_packed; // Complex output
+    NewtonKernels::compute_dc_dopacity_kernel_launcher(
+        model_, visible_indices, camera, render_output, dc_dopacity_packed);
+    */
+
+    // 2. Kernel to accumulate H_sigma_base and g_sigma_base using dc_dopacity.
+    //    g_sigma_base_k = sum_pixels [ (∂c/∂σ_k)ᵀ ⋅ (dL/dc) ]
+    //    H_sigma_base_k = sum_pixels [ (∂c/∂σ_k)ᵀ ⋅ (d²L/dc²) ⋅ (∂c/∂σ_k) ] (since ∂²c/∂σ_k² = 0)
+    /*
+    NewtonKernels::accumulate_opacity_hessian_gradient_kernel_launcher(
+        dc_dopacity_packed, // From previous kernel
+        loss_derivs.dL_dc,
+        loss_derivs.d2L_dc2_diag,
+        render_output, // For pixel mapping if needed
+        H_sigma_base, // Output
+        g_sigma_base  // Output
+    );
+    */
+    // For now, H_sigma_base and g_sigma_base are zeros from initialization.
+
+    // --- Combine with barrier terms ---
+    torch::Tensor H_sigma_total = H_sigma_base + H_barrier; // [N_vis]
+    torch::Tensor g_sigma_total = g_sigma_base + g_barrier; // [N_vis]
+
+    // --- Solve the linear system H_sigma * Δsigma = -g_sigma ---
+    // Δsigma = -g_sigma / (H_sigma_total + damping)
+    torch::Tensor delta_sigma = torch::zeros_like(g_sigma_total);
+    if (g_sigma_total.numel() > 0) {
+        delta_sigma = -g_sigma_total / (H_sigma_total + options_.damping); // Element-wise
+        delta_sigma = options_.step_scale * delta_sigma; // Apply step scale
+        // NaN/inf guard
+        delta_sigma.nan_to_num_(0.0, 0.0, 0.0);
+    }
+
+    // The delta_sigma is an update to sigma_k directly.
+    // The barrier terms in H and g are meant to keep sigma_k within (0,1).
+    // Clamping might still be needed if updates are too large.
+    // delta_sigma = torch::clamp(current_opacities_sigma + delta_sigma, 1e-7f, 1.0f - 1e-7f) - current_opacities_sigma;
+
+
     // TODO: Implement paper's "Opacity solve" (with log barriers)
     // 1. Get current opacities: model_.get_opacity().index_select(0, visible_indices)
     // 2. Compute ∂c/∂σ_k (paper says ∂²c/∂σ_k² = 0)

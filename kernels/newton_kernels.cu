@@ -562,6 +562,41 @@ void NewtonKernels::batch_solve_1x1_system_kernel_launcher(
     // }
 }
 
+// --- Definitions for Opacity Optimization Launchers (Stubs) ---
+
+void NewtonKernels::compute_opacity_hessian_gradient_components_kernel_launcher(
+    int H_img, int W_img, int C_img,
+    int P_total,
+    const torch::Tensor& means_all,
+    const torch::Tensor& scales_all,
+    const torch::Tensor& rotations_all,
+    const torch::Tensor& opacities_all,
+    const torch::Tensor& shs_all,
+    int sh_degree,
+    const torch::Tensor& view_matrix,
+    const torch::Tensor& K_matrix,
+    const torch::Tensor& cam_pos_world,
+    const gs::RenderOutput& render_output,
+    const torch::Tensor& visible_indices,
+    const torch::Tensor& dL_dc_pixelwise,
+    const torch::Tensor& d2L_dc2_diag_pixelwise,
+    torch::Tensor& out_H_sigma_base,
+    torch::Tensor& out_g_sigma_base) {
+    // This function would:
+    // 1. Prepare raw pointers from input tensors.
+    // 2. Launch CUDA kernel(s) to compute ∂c/∂σ_k. The paper states ∂²c/∂σ_k² = 0.
+    //    The formula for ∂c/∂σ_k involves terms like G_k, accumulated alpha from prior Gaussians,
+    //    the Gaussian's own color c_k, and the color accumulated from Gaussians behind it.
+    //    This requires careful handling of sorted Gaussians and their blended contributions.
+    // 3. Accumulate H_σ_base_k and g_σ_base_k for each visible Gaussian:
+    //    g_σ_base_k = sum_pixels [ (∂c/∂σ_k)ᵀ ⋅ (dL/dc) ]
+    //    H_σ_base_k = sum_pixels [ (∂c/∂σ_k)ᵀ ⋅ (d²L/dc²) ⋅ (∂c/∂σ_k) ]
+    // For now, it does nothing; out_H_sigma_base and out_g_sigma_base remain as initialized (e.g., zeros).
+    // if (options_debug_print_shapes_can_be_passed_here) { // Assuming a debug flag could be passed
+    //     printf("[STUB KERNEL LAUNCHER] compute_opacity_hessian_gradient_components_kernel_launcher called.\n");
+    // }
+}
+
 
 // Make sure torch_utils.hpp has these definitions or similar:
 // namespace gs { namespace torch_utils {
