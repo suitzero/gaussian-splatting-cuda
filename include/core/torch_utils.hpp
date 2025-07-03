@@ -10,7 +10,10 @@ inline const T* get_const_data_ptr(const torch::Tensor& tensor, const char* tens
     TORCH_CHECK(tensor.defined(), "Tensor '", tensor_name, "' is not defined.");
     // TORCH_CHECK(tensor.is_cuda(), "Tensor '", tensor_name, "' must be a CUDA tensor. Device: ", tensor.device()); // Re-enable if strictly CUDA needed
     TORCH_CHECK(tensor.is_contiguous(), "Tensor '", tensor_name, "' must be contiguous.");
-    TORCH_CHECK(tensor.numel() == 0 || tensor.data_ptr() != nullptr, "Tensor '", tensor_name, "' has elements but data_ptr is null.");
+    // Explicit type check before calling data_ptr<T>() which also checks type.
+    // This might give a cleaner error if the tensor is defined and contiguous but wrong type.
+    TORCH_CHECK(tensor.numel() == 0 || (tensor.data_ptr() != nullptr && tensor.scalar_type() == torch::CppTypeToScalarType<T>::value),
+                "Tensor '", tensor_name, "' type mismatch or null data_ptr. Expected ", torch::CppTypeToScalarType<T>::value, " but got ", tensor.scalar_type());
     return tensor.data_ptr<T>();
 }
 
@@ -19,7 +22,9 @@ inline T* get_data_ptr(torch::Tensor& tensor, const char* tensor_name = "") {
     TORCH_CHECK(tensor.defined(), "Tensor '", tensor_name, "' is not defined.");
     // TORCH_CHECK(tensor.is_cuda(), "Tensor '", tensor_name, "' must be a CUDA tensor. Device: ", tensor.device()); // Re-enable if strictly CUDA needed
     TORCH_CHECK(tensor.is_contiguous(), "Tensor '", tensor_name, "' must be contiguous.");
-    TORCH_CHECK(tensor.numel() == 0 || tensor.data_ptr() != nullptr, "Tensor '", tensor_name, "' has elements but data_ptr is null.");
+    // Explicit type check
+    TORCH_CHECK(tensor.numel() == 0 || (tensor.data_ptr() != nullptr && tensor.scalar_type() == torch::CppTypeToScalarType<T>::value),
+                "Tensor '", tensor_name, "' type mismatch or null data_ptr. Expected ", torch::CppTypeToScalarType<T>::value, " but got ", tensor.scalar_type());
     return tensor.data_ptr<T>();
 }
 
