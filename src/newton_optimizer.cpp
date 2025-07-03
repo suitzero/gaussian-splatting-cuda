@@ -624,7 +624,80 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_scale_updates_ne
     const Camera& camera,
     const gs::RenderOutput& render_output) {
 
-    if (options_.debug_print_shapes) std::cout << "[NewtonOpt] STUB: compute_scale_updates_newton called." << std::endl;
+    if (options_.debug_print_shapes) std::cout << "[NewtonOpt] STUB: compute_scale_updates_newton called for " << visible_indices.numel() << " Gaussians." << std::endl;
+
+    if (visible_indices.numel() == 0) {
+        return AttributeUpdateOutput(torch::empty({0}, model_.get_scaling().options()), true); // Success, but no work
+    }
+
+    // --- Get necessary data ---
+    const torch::Tensor current_scales = model_.get_scaling().index_select(0, visible_indices).detach();
+    const torch::Tensor current_rotations = model_.get_rotation().index_select(0, visible_indices).detach();
+    const torch::Tensor current_means = model_.get_means().index_select(0, visible_indices).detach();
+    // Other model params like opacity, SHs might be needed if ∂c/∂s_k depends on them for full color C.
+
+    int num_vis_gaussians = static_cast<int>(visible_indices.numel());
+    auto tensor_opts_float = current_scales.options();
+
+    // --- Placeholder outputs from conceptual CUDA kernels ---
+    // These would compute ∂c/∂s_k and ∂²c/∂s_k² per pixel, then sum over pixels.
+    // For simplicity, let's assume they directly output per-Gaussian H_s and g_s.
+    // H_s_k : [num_vis_gaussians, 6] (for 3x3 symmetric Hessian of scales)
+    // g_s_k : [num_vis_gaussians, 3] (gradient w.r.t. scales)
+    torch::Tensor H_s_packed = torch::zeros({num_vis_gaussians, 6}, tensor_opts_float);
+    torch::Tensor g_s = torch::zeros({num_vis_gaussians, 3}, tensor_opts_float);
+
+    // Conceptual kernel call to compute per-Gaussian Hessian and gradient for scales
+    // This kernel would be extremely complex, involving:
+    // - Projecting Gaussians (like in position solve)
+    // - Calculating ∂Σ_k/∂s_k (how 3D scale affects 2D covariance)
+    // - Calculating ∂G_k/∂Σ_k (how Gaussian PDF changes with 2D covariance)
+    // - Calculating ∂c/∂G_k (how color changes with Gaussian PDF value - depends on blending)
+    // - Chaining these for ∂c/∂s_k and its second derivative ∂²c/∂s_k²
+    // - Summing contributions over pixels using loss_derivs.dL_dc and loss_derivs.d2L_dc2_diag
+    //   to form H_s_k and g_s_k using equations like:
+    //   g_s_k = sum_pixels [ (∂c(pixel)/∂s_k)ᵀ * (dL/dc(pixel)) ]
+    //   H_s_k = sum_pixels [ (∂c(pixel)/∂s_k)ᵀ * (d²L/dc²(pixel)) * (∂c(pixel)/∂s_k) + (dL/dc(pixel)) ⋅ (∂²c(pixel)/∂s_k²) ]
+    /*
+    NewtonKernels::compute_scale_hessian_gradient_components_kernel_launcher(
+        render_output.height, render_output.width, render_output.image.size(-1), // C_img
+        model_, // Pass relevant parts of model or specific tensors
+        visible_indices,
+        view_mat_tensor, // Need view_mat from primary_camera
+        K_matrix,        // Need K from primary_camera
+        cam_pos_world,   // Need cam_pos from primary_camera
+        render_output,   // For tile iterators, etc.
+        loss_derivs.dL_dc,
+        loss_derivs.d2L_dc2_diag,
+        H_s_packed, // Output
+        g_s         // Output
+    );
+    */
+    // For now, H_s_packed and g_s are zeros.
+
+    // Paper mentions projection to eigenvalue space (lambda_min, lambda_max) for robustness.
+    // Σ_k = V_k Λ_k V_kᵀ ; E_2ᵀ : (V_k J_k W_k R_k) : E_3 s_k = λ_k
+    // This implies a transformation T_k such that Δs_k = T_k' Δλ_k or similar.
+    // And g_λ = T_kᵀ g_s, H_λ = T_kᵀ H_s T_k.
+    // This is a change of variables for the optimization.
+    // For this structural stub, we'll proceed as if solving directly for Δs_k.
+    // A full implementation would need the projection logic.
+
+    // --- Solve the linear system H_s * Δs = -g_s ---
+    // This would be a batch 3x3 solve for each Gaussian.
+    // For simplicity, placeholder for delta_s (actual solve needed).
+    torch::Tensor delta_s = torch::zeros_like(g_s);
+    if (g_s.numel() > 0) {
+        // Conceptual:
+        // delta_s = NewtonKernels::batch_solve_3x3_system_kernel_launcher(H_s_packed, g_s, options_.damping);
+        // delta_s = -options_.step_scale * delta_s; // Apply step scale
+
+        // Placeholder: simplified update (e.g., gradient descent on scales for testing)
+        // This is NOT the Newton step.
+        delta_s = -options_.step_scale * g_s * 0.01; // Small learning rate for placeholder
+    }
+
+
     // TODO: Implement paper's "Scaling solve"
     // 1. Get current scales: model_.get_scaling().index_select(0, visible_indices)
     // 2. Compute ∂c/∂s_k, ∂²c/∂s_k² (VERY COMPLEX - requires new CUDA kernels & use of supplement)

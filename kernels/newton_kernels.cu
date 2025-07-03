@@ -461,6 +461,60 @@ void NewtonKernels::project_update_to_3d_kernel_launcher(
     CUDA_CHECK(cudaGetLastError());
 }
 
+// --- Definitions for Scale Optimization Launchers (Stubs) ---
+
+void NewtonKernels::compute_scale_hessian_gradient_components_kernel_launcher(
+    int H_img, int W_img, int C_img,
+    int P_total,
+    const torch::Tensor& means_all,
+    const torch::Tensor& scales_all,
+    const torch::Tensor& rotations_all,
+    const torch::Tensor& opacities_all,
+    const torch::Tensor& shs_all,
+    int sh_degree,
+    const torch::Tensor& view_matrix,
+    const torch::Tensor& K_matrix,
+    const torch::Tensor& cam_pos_world,
+    const gs::RenderOutput& render_output,
+    const torch::Tensor& visible_indices,
+    const torch::Tensor& dL_dc_pixelwise,
+    const torch::Tensor& d2L_dc2_diag_pixelwise,
+    torch::Tensor& out_H_s_packed,
+    torch::Tensor& out_g_s
+    // bool debug_prints_enabled // TODO: Add this if needed
+) {
+    // TODO: Pass debug_prints_enabled if options_.debug_print_shapes is to be respected here
+    // if (debug_prints_enabled) {
+    //     printf("[STUB KERNEL LAUNCHER] compute_scale_hessian_gradient_components_kernel_launcher called.\n");
+    // }
+    // This function would:
+    // 1. Prepare raw pointers from all input tensors.
+    // 2. Launch one or more CUDA kernels to compute ∂c/∂s_k, ∂²c/∂s_k², and then accumulate
+    //    H_s_k and g_s_k for each visible Gaussian.
+    // For now, it does nothing, out_H_s_packed and out_g_s remain as initialized (e.g. zeros).
+}
+
+void NewtonKernels::batch_solve_3x3_system_kernel_launcher(
+    int num_systems,
+    const torch::Tensor& H_s_packed,
+    const torch::Tensor& g_s,
+    float damping,
+    torch::Tensor& out_delta_s
+    // bool debug_prints_enabled // TODO: Add this if needed
+) {
+    // TODO: Pass debug_prints_enabled if options_.debug_print_shapes is to be respected here
+    // if (debug_prints_enabled) {
+    //    printf("[STUB KERNEL LAUNCHER] batch_solve_3x3_system_kernel_launcher called for %d systems.\n", num_systems);
+    // }
+    // This function would:
+    // 1. Prepare raw pointers.
+    // 2. Launch a CUDA kernel to solve N independent 3x3 systems: H_s * Δs = -g_s.
+    //    (H_s is symmetric, so 6 unique elements from H_s_packed).
+    // For now, it does nothing, out_delta_s remains as initialized (e.g. zeros if we expect it to be filled).
+    // The calling C++ code currently zeros delta_s and does a pseudo-GD step.
+}
+
+
 // Make sure torch_utils.hpp has these definitions or similar:
 // namespace gs { namespace torch_utils {
 // template <typename T>
