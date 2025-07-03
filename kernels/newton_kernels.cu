@@ -120,7 +120,7 @@ __device__ __forceinline__ void mat_mul_mat(const float* A, const float* B, floa
 // --- Projection Derivative Helper Functions ---
 namespace ProjectionDerivs {
 
-__device__ __forceinline__ void compute_h_vec(const ::float3& p_k, const float* PW, float* h_vec4) {
+__device__ __forceinline__ void compute_h_vec(const ::float3& p_k, const float* PW, float* h_vec4) { // Using ::float3
     float p_k_h[4] = {p_k.x, p_k.y, p_k.z, 1.0f};
     CudaMath::mul_mat4_vec4(PW, p_k_h, h_vec4);
 }
@@ -192,7 +192,7 @@ __device__ __forceinline__ void compute_projection_hessian(
 namespace SHDerivs {
 
 __device__ __forceinline__ void eval_sh_basis_up_to_degree3(
-    int degree, const ::float3& r_k_normalized, float* basis_out
+    int degree, const ::float3& r_k_normalized, float* basis_out // Using ::float3
 ) {
     float x = r_k_normalized.x;
     float y = r_k_normalized.y;
@@ -224,7 +224,7 @@ __device__ __forceinline__ void eval_sh_basis_up_to_degree3(
 }
 
 __device__ __forceinline__ void compute_drk_dpk(
-    const ::float3& r_k_normalized, float r_k_norm, float* drk_dpk_out_3x3
+    const ::float3& r_k_normalized, float r_k_norm, float* drk_dpk_out_3x3 // Using ::float3
 ) {
     float inv_r_k_norm = 1.0f / (r_k_norm + 1e-8f);
     drk_dpk_out_3x3[0] = 1.0f; drk_dpk_out_3x3[1] = 0.0f; drk_dpk_out_3x3[2] = 0.0f;
@@ -245,7 +245,7 @@ __device__ __forceinline__ void compute_drk_dpk(
 }
 
 __device__ __forceinline__ void compute_dphi_drk_up_to_degree3(
-    int degree, const ::float3& r_k_normalized, float* dPhi_drk_out
+    int degree, const ::float3& r_k_normalized, float* dPhi_drk_out // Using ::float3
 ) {
     float x = r_k_normalized.x; float y = r_k_normalized.y; float z = r_k_normalized.z;
     float x2 = x*x; float y2 = y*y; float z2 = z*z;
@@ -314,7 +314,7 @@ __device__ __forceinline__ void compute_sh_color_jacobian_single_channel(
 // --- KERNEL DEFINITIONS ---
 
 __device__ __forceinline__ void get_projected_cov2d_and_derivs_placeholder(
-    const ::float3& p_k_world,
+    const ::float3& p_k_world, // Using ::float3
     const float* scales_k, const float* rotations_k,
     const float* view_matrix, const float* proj_matrix,
     const float* jacobian_d_pi_d_pk,
@@ -533,65 +533,36 @@ __global__ void project_position_hessian_gradient_kernel(
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_visible_gaussians) return;
 
-    // 1. Calculate r_k = p_k - cam_pos_world (view vector from camera to point)
-    //    It's often more convenient to use the camera's Z-axis (view direction) and up/right vectors.
-    //    The paper's U_k = [u_x, u_y] forms a 2D basis perpendicular to r_k.
-    //    Let r_k = means_3d_visible[idx*3+c] - cam_pos_world[c]
-    //    This r_k is pointing from camera to Gaussian.
-    //    The paper mentions "camera's look at r_k". This usually means r_k is the direction vector.
-    //    Let's assume view_matrix gives camera orientation. view_matrix[2], view_matrix[6], view_matrix[10] is cam Z axis (if row-major).
-    //    Let world_z_vec = {view_matrix[2], view_matrix[6], view_matrix[10]} (camera's forward vector)
-    //    Let world_y_vec = {view_matrix[1], view_matrix[5], view_matrix[9]} (camera's up vector)
-    //    Let world_x_vec = {view_matrix[0], view_matrix[4], view_matrix[8]} (camera's right vector)
+    float ux[3] = {view_matrix[0], view_matrix[4], view_matrix[8]};
+    float uy[3] = {view_matrix[1], view_matrix[5], view_matrix[9]};
 
-    // Simplified U_k: use camera's X and Y axes in world space as u_x, u_y.
-    // This assumes planar adjustment aligned with camera's own axes.
-    // Paper Eq 14 is more complex: u_y = (r_k outer_prod r_k)[0,1,0]^T / norm(...)
-    // This implies r_k is used to define the plane.
-    // For now, let u_x = camera right, u_y = camera up. This is a common simplification for screen-space operations.
-    float ux[3] = {view_matrix[0], view_matrix[4], view_matrix[8]}; // Camera Right
-    float uy[3] = {view_matrix[1], view_matrix[5], view_matrix[9]}; // Camera Up
-
-    // Project gradient: g_v = U^T g_p
-    // g_v[0] = ux . grad_p_input[idx*3+c]
-    // g_v[1] = uy . grad_p_input[idx*3+c]
     out_grad_v[idx*2 + 0] = ux[0]*grad_p_input[idx*3+0] + ux[1]*grad_p_input[idx*3+1] + ux[2]*grad_p_input[idx*3+2];
     out_grad_v[idx*2 + 1] = uy[0]*grad_p_input[idx*3+0] + uy[1]*grad_p_input[idx*3+1] + uy[2]*grad_p_input[idx*3+2];
 
-    // Project Hessian: H_v = U^T H_p U
-    // H_p matrix from packed:
-    // [ H00 H01 H02 ]
-    // [ H01 H11 H12 ]
-    // [ H02 H12 H22 ]
-    // H_p_packed_input = [H00, H01, H02, H11, H12, H22]
     const float* Hp = &H_p_packed_input[idx*6];
-    float Hpu_x[3]; // H_p * u_x
+    float Hpu_x[3];
     Hpu_x[0] = Hp[0]*ux[0] + Hp[1]*ux[1] + Hp[2]*ux[2];
     Hpu_x[1] = Hp[1]*ux[0] + Hp[3]*ux[1] + Hp[4]*ux[2];
     Hpu_x[2] = Hp[2]*ux[0] + Hp[4]*ux[1] + Hp[5]*ux[2];
 
-    float Hpu_y[3]; // H_p * u_y
+    float Hpu_y[3];
     Hpu_y[0] = Hp[0]*uy[0] + Hp[1]*uy[1] + Hp[2]*uy[2];
     Hpu_y[1] = Hp[1]*uy[0] + Hp[3]*uy[1] + Hp[4]*uy[2];
     Hpu_y[2] = Hp[2]*uy[0] + Hp[4]*uy[1] + Hp[5]*uy[2];
 
-    // H_v elements:
-    // Hv_xx = u_x^T H_p u_x
     out_H_v_packed[idx*3 + 0] = ux[0]*Hpu_x[0] + ux[1]*Hpu_x[1] + ux[2]*Hpu_x[2];
-    // Hv_xy = u_x^T H_p u_y
     out_H_v_packed[idx*3 + 1] = ux[0]*Hpu_y[0] + ux[1]*Hpu_y[1] + ux[2]*Hpu_y[2];
-    // Hv_yy = u_y^T H_p u_y
     out_H_v_packed[idx*3 + 2] = uy[0]*Hpu_y[0] + uy[1]*Hpu_y[1] + uy[2]*Hpu_y[2];
 }
 
 // Kernel for batch 2x2 solve
 __global__ void batch_solve_2x2_system_kernel(
     int num_systems,
-    const float* H_v_packed, // [N, 3] (H00, H01, H11)
-    const float* g_v,        // [N, 2] (g0, g1)
+    const float* H_v_packed,
+    const float* g_v,
     float damping,
     float step_scale,
-    float* out_delta_v) {    // [N, 2]
+    float* out_delta_v) {
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_systems) return;
@@ -603,23 +574,17 @@ __global__ void batch_solve_2x2_system_kernel(
     float g0 = g_v[idx*2 + 0];
     float g1 = g_v[idx*2 + 1];
 
-    // Add damping to diagonal
     H00 += damping;
     H11 += damping;
 
     float det = H00 * H11 - H01 * H01;
 
-    // If det is too small, effectively no update or use gradient descent step
     if (abs(det) < 1e-8f) {
-        out_delta_v[idx*2 + 0] = -step_scale * g0 / (H00 + 1e-6f); // Simplified fallback
+        out_delta_v[idx*2 + 0] = -step_scale * g0 / (H00 + 1e-6f);
         out_delta_v[idx*2 + 1] = -step_scale * g1 / (H11 + 1e-6f);
         return;
     }
-
     float inv_det = 1.f / det;
-
-    // delta_v = - H_inv * g
-    // H_inv = inv_det * [H11, -H01; -H01, H00]
     out_delta_v[idx*2 + 0] = -step_scale * inv_det * (H11 * g0 - H01 * g1);
     out_delta_v[idx*2 + 1] = -step_scale * inv_det * (-H01 * g0 + H00 * g1);
 }
@@ -627,30 +592,27 @@ __global__ void batch_solve_2x2_system_kernel(
 // Kernel for re-projecting delta_v to delta_p
 __global__ void project_update_to_3d_kernel(
     int num_updates,
-    const float* delta_v,          // [N, 2] (dvx, dvy)
-    const float* means_3d_visible, // [N, 3] (Not strictly needed if U_k doesn't depend on p_k itself, but paper's U_k does via r_k)
-    const float* view_matrix,      // [16]
-    const float* cam_pos_world,    // [3]
-    float* out_delta_p) {          // [N, 3]
+    const float* delta_v,
+    const float* means_3d_visible,
+    const float* view_matrix,
+    const float* cam_pos_world,
+    float* out_delta_p) {
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_updates) return;
 
-    // Using the same simplified U_k = [cam_right, cam_up] as in projection kernel
-    float ux[3] = {view_matrix[0], view_matrix[4], view_matrix[8]}; // Camera Right
-    float uy[3] = {view_matrix[1], view_matrix[5], view_matrix[9]}; // Camera Up
+    float ux[3] = {view_matrix[0], view_matrix[4], view_matrix[8]};
+    float uy[3] = {view_matrix[1], view_matrix[5], view_matrix[9]};
 
     float dvx = delta_v[idx*2 + 0];
     float dvy = delta_v[idx*2 + 1];
 
-    // delta_p = U_k * delta_v = u_x * dvx + u_y * dvy
     out_delta_p[idx*3 + 0] = ux[0] * dvx + uy[0] * dvy;
     out_delta_p[idx*3 + 1] = ux[1] * dvx + uy[1] * dvy;
     out_delta_p[idx*3 + 2] = ux[2] * dvx + uy[2] * dvy;
 }
 
 // --- Spherical Harmonics Basis Evaluation Kernel ---
-// Based on gsplat's sh_coeffs_to_color_fast, but only computes basis values.
 __global__ void eval_sh_basis_kernel(
     const int num_points, const int degree,
     const float* dirs, float* sh_basis_output) {
@@ -767,16 +729,13 @@ void NewtonKernels::compute_loss_derivatives_kernel_launcher(
     float* out_dL_dc_ptr = gs::torch_utils::get_data_ptr<float>(out_dL_dc_tensor);
     float* out_d2L_dc2_diag_ptr = gs::torch_utils::get_data_ptr<float>(out_d2L_dc2_diag_tensor);
 
-    // Create temporary tensors for L1/L2 parts
     auto tensor_opts = rendered_image_tensor.options();
     torch::Tensor dL_dc_l1l2 = torch::empty_like(rendered_image_tensor, tensor_opts);
     torch::Tensor d2L_dc2_diag_l1l2 = torch::empty_like(rendered_image_tensor, tensor_opts);
 
-    // Calculate normalization factor
     const float N_pixels = static_cast<float>(H * W);
-    const float inv_N_pixels = (N_pixels > 0) ? (1.0f / N_pixels) : 1.0f; // Avoid div by zero if H*W=0
+    const float inv_N_pixels = (N_pixels > 0) ? (1.0f / N_pixels) : 1.0f;
 
-    // Call kernel for L1/L2 derivatives
     compute_l1l2_loss_derivatives_kernel<<<GET_BLOCKS(total_elements), CUDA_NUM_THREADS>>>(
         rendered_image_ptr, gt_image_ptr, use_l2_loss_term, inv_N_pixels,
         gs::torch_utils::get_data_ptr<float>(dL_dc_l1l2),
@@ -785,55 +744,30 @@ void NewtonKernels::compute_loss_derivatives_kernel_launcher(
     );
     CUDA_CHECK(cudaGetLastError());
 
-    // --- SSIM Part ---
-    // Constants for SSIM
     const float C1 = 0.01f * 0.01f;
     const float C2 = 0.03f * 0.03f;
 
-    // Reshape and permute images for SSIM functions: [H,W,C] -> [1,C,H,W]
     torch::Tensor img1_bchw = rendered_image_tensor.unsqueeze(0).permute({0, 3, 1, 2}).contiguous();
     torch::Tensor img2_bchw = gt_image_tensor.unsqueeze(0).permute({0, 3, 1, 2}).contiguous();
 
-    // Call fusedssim to get ssim_map and intermediate derivatives for backward pass
-    // Need to include "kernels/ssim.cuh" for these C++ functions
-    auto ssim_outputs = fusedssim(C1, C2, img1_bchw, img2_bchw, true /* train=true */);
+    auto ssim_outputs = fusedssim(C1, C2, img1_bchw, img2_bchw, true );
     torch::Tensor ssim_map_bchw = std::get<0>(ssim_outputs);
     torch::Tensor dm_dmu1 = std::get<1>(ssim_outputs);
     torch::Tensor dm_dsigma1_sq = std::get<2>(ssim_outputs);
     torch::Tensor dm_dsigma12 = std::get<3>(ssim_outputs);
 
-    // Define dL_s/d(ssim_map). Assuming L_s = DSSIM = (1 - SSIM)/2, so dL_s/d(ssim_map) = -0.5
-    // The lambda_dssim is applied to the result of dL_s/dc.
-    // If L_s is the loss term itself, then dL_s/d(map) is the derivative of that loss.
-    // If the loss is L = (1-lambda)*L2 + lambda*DSSIM, then dL/d(DSSIM) = lambda.
-    // And d(DSSIM)/d(SSIM_map) = -0.5. So dL/d(SSIM_map) = -0.5 * lambda.
-    // However, the formulation L = L2 + lambda*L_S suggests lambda is a weight for L_S.
-    // Let's assume L_S is DSSIM. Then the dL_s/dc we compute will be d(DSSIM)/dc.
-    // The final dL/dc will be dL2/dc + lambda_dssim * d(DSSIM)/dc.
-    // So, for d(DSSIM)/dc, we need d(DSSIM)/d(SSIM_map) = -0.5.
     torch::Tensor dL_dmap_tensor = torch::full_like(ssim_map_bchw, -0.5f);
 
-    // Call fusedssim_backward to get d(SSIM_loss)/dc (which is d(DSSIM)/dc if dL_dmap is for DSSIM)
     torch::Tensor dL_dc_ssim_bchw = fusedssim_backward(
         C1, C2, img1_bchw, img2_bchw, dL_dmap_tensor, dm_dmu1, dm_dsigma1_sq, dm_dsigma12
     );
 
-    // Permute dL_dc_ssim back to [H,W,C]
     torch::Tensor dL_dc_ssim_hwc_unnormalized = dL_dc_ssim_bchw.permute({0, 2, 3, 1}).squeeze(0).contiguous();
     torch::Tensor dL_dc_ssim_hwc_normalized = dL_dc_ssim_hwc_unnormalized * inv_N_pixels;
 
-    // Combine derivatives: out_dL_dc = dL_dc_l1l2 + lambda_dssim * dL_dc_ssim_hwc_normalized
-    // dL_dc_l1l2 is already normalized by inv_N_pixels inside its kernel
     out_dL_dc_tensor.copy_(dL_dc_l1l2 + lambda_dssim * dL_dc_ssim_hwc_normalized);
-
-    // Set out_d2L_dc2_diag_tensor:
-    // d2L_dc2_diag_l1l2 is already normalized by inv_N_pixels inside its kernel
-    // As discussed, SSIM's second derivative d2L_s/dc2 is not computed by ssim.cu.
-    // We assume it's effectively zero or handled by use_l2_for_hessian_L_term logic,
-    // meaning only the L1/L2 part contributes to the d2L/dc2 term in Hessian assembly.
     out_d2L_dc2_diag_tensor.copy_(d2L_dc2_diag_l1l2);
-
-    CUDA_CHECK(cudaGetLastError()); // Check for errors from SSIM calls too
+    CUDA_CHECK(cudaGetLastError());
 }
 
 
@@ -843,20 +777,18 @@ void NewtonKernels::compute_position_hessian_components_kernel_launcher(
     const float* means_3d_all, const float* scales_all, const float* rotations_all,
     const float* opacities_all, const float* shs_all,
     int sh_degree,
-    int sh_coeffs_per_color_channel, // Changed from sh_coeffs_dim
-    const float* view_matrix_ptr, // Already a pointer from C++
-    const float* perspective_proj_matrix_ptr, // Changed from projection_matrix_for_jacobian
-    const float* cam_pos_world_ptr, // Already a pointer from C++
-    // Removed means_2d_render, depths_render, radii_render, P_render as kernel doesn't use them directly
+    int sh_coeffs_per_color_channel,
+    const float* view_matrix_ptr,
+    const float* perspective_proj_matrix_ptr,
+    const float* cam_pos_world_ptr,
     const torch::Tensor& visibility_mask_for_model_tensor,
-    const float* dL_dc_pixelwise_ptr, // Already a pointer
-    const float* d2L_dc2_diag_pixelwise_ptr, // Already a pointer
+    const float* dL_dc_pixelwise_ptr,
+    const float* d2L_dc2_diag_pixelwise_ptr,
     int num_output_gaussians,
-    float* H_p_output_packed_ptr, // Already a pointer
-    float* grad_p_output_ptr,   // Already a pointer
+    float* H_p_output_packed_ptr,
+    float* grad_p_output_ptr,
     bool debug_prints_enabled
 ) {
-    // Construct the output_index_map (mapping P_total index to dense output index)
     TORCH_CHECK(visibility_mask_for_model_tensor.defined(), "visibility_mask_for_model_tensor is not defined in launcher.");
     TORCH_CHECK(visibility_mask_for_model_tensor.scalar_type() == torch::kBool, "visibility_mask_for_model_tensor must be Bool type.");
     TORCH_CHECK(static_cast<int>(visibility_mask_for_model_tensor.size(0)) == P_total, "visibility_mask_for_model_tensor size mismatch with P_total.");
@@ -873,14 +805,13 @@ void NewtonKernels::compute_position_hessian_components_kernel_launcher(
             output_index_map_cpu[i] = -1;
         }
     }
-    // AT_ASSERTM(current_out_idx == num_output_gaussians, "Mismatch in visible count for output_index_map"); // Good check but might fail if num_output_gaussians is pre-calculated slightly differently.
 
     torch::Tensor output_index_map_tensor = torch::tensor(output_index_map_cpu,
-        torch::TensorOptions().dtype(torch::kInt).device(visibility_mask_for_model_tensor.device())); // Keep on same device
+        torch::TensorOptions().dtype(torch::kInt).device(visibility_mask_for_model_tensor.device()));
     const int* output_index_map_gpu = gs::torch_utils::get_const_data_ptr<int>(output_index_map_tensor, "output_index_map_tensor_in_launcher");
     const bool* visibility_mask_gpu_ptr = gs::torch_utils::get_const_data_ptr<bool>(visibility_mask_for_model_tensor, "visibility_mask_for_model_tensor_for_kernel");
 
-    if (debug_prints_enabled && P_total > 0) { // Added P_total > 0 to avoid printing for empty scenes
+    if (debug_prints_enabled && P_total > 0) {
          printf("[CUDA LAUNCHER] compute_position_hessian_components_kernel. P_total: %d, num_output_gaussians: %d, H/W/C: %d/%d/%d\n",
                 P_total, num_output_gaussians, H_img, W_img, C_img);
     }
@@ -894,9 +825,9 @@ void NewtonKernels::compute_position_hessian_components_kernel_launcher(
         opacities_all,
         shs_all,
         sh_degree,
-        sh_coeffs_per_color_channel, // Use the new name
+        sh_coeffs_per_color_channel,
         view_matrix_ptr,
-        perspective_proj_matrix_ptr, // Use the new name (4x4 P matrix)
+        perspective_proj_matrix_ptr,
         cam_pos_world_ptr,
         visibility_mask_gpu_ptr,
         dL_dc_pixelwise_ptr,
@@ -967,17 +898,9 @@ void NewtonKernels::compute_scale_hessian_gradient_components_kernel_launcher(
     const torch::Tensor& d2L_dc2_diag_pixelwise,
     torch::Tensor& out_H_s_packed,
     torch::Tensor& out_g_s
-    // bool debug_prints_enabled // TODO: Add this if needed
 ) {
-    // TODO: Pass debug_prints_enabled if options_.debug_print_shapes is to be respected here
-    // if (debug_prints_enabled) {
-    //     printf("[STUB KERNEL LAUNCHER] compute_scale_hessian_gradient_components_kernel_launcher called.\n");
-    // }
-    // This function would:
-    // 1. Prepare raw pointers from all input tensors.
-    // 2. Launch one or more CUDA kernels to compute ∂c/∂s_k, ∂²c/∂s_k², and then accumulate
-    //    H_s_k and g_s_k for each visible Gaussian.
-    // For now, it does nothing, out_H_s_packed and out_g_s remain as initialized (e.g. zeros).
+    if (out_H_s_packed.defined()) out_H_s_packed.zero_(); // Stub behavior
+    if (out_g_s.defined()) out_g_s.zero_();             // Stub behavior
 }
 
 void NewtonKernels::batch_solve_3x3_system_kernel_launcher(
@@ -986,16 +909,7 @@ void NewtonKernels::batch_solve_3x3_system_kernel_launcher(
     const torch::Tensor& g_s,
     float damping,
     torch::Tensor& out_delta_s
-    // bool debug_prints_enabled // TODO: Add this if needed
 ) {
-    // TODO: Pass debug_prints_enabled if options_.debug_print_shapes is to be respected here
-    // if (debug_prints_enabled) {
-    //    printf("[STUB KERNEL LAUNCHER] batch_solve_3x3_system_kernel_launcher called for %d systems.\n", num_systems);
-    // }
-    // This function would:
-    // 1. Prepare raw pointers.
-    // 2. Launch a CUDA kernel to solve N independent 3x3 systems: H_s * Δs = -g_s.
-    //    (H_s is symmetric, so 6 unique elements from H_s_packed).
     TORCH_CHECK(H_s_packed.defined() && H_s_packed.dim() == 2 && H_s_packed.size(1) == 6, "H_s_packed shape must be [N, 6]");
     TORCH_CHECK(g_s.defined() && g_s.dim() == 2 && g_s.size(1) == 3, "g_s shape must be [N, 3]");
     TORCH_CHECK(out_delta_s.defined() && out_delta_s.dim() == 2 && out_delta_s.size(1) == 3, "out_delta_s shape must be [N, 3]");
@@ -1010,11 +924,7 @@ void NewtonKernels::batch_solve_3x3_system_kernel_launcher(
     float* delta_s_ptr = gs::torch_utils::get_data_ptr<float>(out_delta_s, "out_delta_s");
 
     batch_solve_3x3_symmetric_system_kernel<<<GET_BLOCKS(num_systems), CUDA_NUM_THREADS>>>(
-        num_systems,
-        H_ptr,
-        g_ptr,
-        damping,
-        delta_s_ptr
+        num_systems, H_ptr, g_ptr, damping, delta_s_ptr
     );
     CUDA_CHECK(cudaGetLastError());
 }
@@ -1039,15 +949,10 @@ void NewtonKernels::compute_rotation_hessian_gradient_components_kernel_launcher
     const torch::Tensor& dL_dc_pixelwise,
     const torch::Tensor& d2L_dc2_diag_pixelwise,
     torch::Tensor& out_H_theta,
-    torch::Tensor& out_g_theta) {
-    // This function would:
-    // 1. Prepare raw pointers from input tensors.
-    // 2. Launch CUDA kernel(s) to compute ∂c/∂θ_k, ∂²c/∂θ_k², and then accumulate
-    //    H_θ_k and g_θ_k for each visible Gaussian, using r_k as rotation axis.
-    // For now, it does nothing; out_H_theta and out_g_theta remain as initialized.
-    // if (options_debug_print_shapes_can_be_passed_here) {
-    //     printf("[STUB KERNEL LAUNCHER] compute_rotation_hessian_gradient_components_kernel_launcher called.\n");
-    // }
+    torch::Tensor& out_g_theta
+) {
+    if (out_H_theta.defined()) out_H_theta.zero_(); // Stub behavior
+    if (out_g_theta.defined()) out_g_theta.zero_(); // Stub behavior
 }
 
 void NewtonKernels::batch_solve_1x1_system_kernel_launcher(
@@ -1055,36 +960,21 @@ void NewtonKernels::batch_solve_1x1_system_kernel_launcher(
     const torch::Tensor& H_theta,
     const torch::Tensor& g_theta,
     float damping,
-    torch::Tensor& out_delta_theta) {
-    // This function would:
-    // 1. Prepare raw pointers.
-    // 2. Launch a CUDA kernel to solve N independent 1x1 systems:
-    //    (H_theta_k + damping) * Δθ_k = -g_theta_k  => Δθ_k = -g_theta_k / (H_theta_k + damping)
-    // For now, it does nothing; out_delta_theta remains as initialized.
-    // The calling C++ code in NewtonOptimizer currently has a placeholder for this.
-    // if (options_debug_print_shapes_can_be_passed_here) {
-    //     printf("[STUB KERNEL LAUNCHER] batch_solve_1x1_system_kernel_launcher called for %d systems.\n", num_systems);
-    // }
+    torch::Tensor& out_delta_theta
+) {
     TORCH_CHECK(H_theta.defined() && H_theta.size(0) == num_systems, "H_theta size mismatch");
     TORCH_CHECK(g_theta.defined() && g_theta.size(0) == num_systems, "g_theta size mismatch");
     TORCH_CHECK(out_delta_theta.defined() && out_delta_theta.size(0) == num_systems, "out_delta_theta size mismatch");
     TORCH_CHECK(H_theta.is_cuda() && g_theta.is_cuda() && out_delta_theta.is_cuda(), "All tensors must be CUDA tensors");
-    // Assuming tensors can be [N] or [N,1].contiguous() makes them effectively [N] for data_ptr.
-    // If they must be [N,1], ensure contiguity after potential reshape.
-    // For simplicity, assume they are already prepared as contiguous (e.g. after .contiguous() call if reshaped from [N,1])
 
     if (num_systems == 0) return;
 
     const float* H_ptr = gs::torch_utils::get_const_data_ptr<float>(H_theta.contiguous(), "H_theta");
     const float* g_ptr = gs::torch_utils::get_const_data_ptr<float>(g_theta.contiguous(), "g_theta");
-    float* delta_theta_ptr = gs::torch_utils::get_data_ptr<float>(out_delta_theta.contiguous(), "out_delta_theta"); // Ensure contiguous for output too
+    float* delta_theta_ptr = gs::torch_utils::get_data_ptr<float>(out_delta_theta.contiguous(), "out_delta_theta");
 
     batch_solve_1x1_system_kernel<<<GET_BLOCKS(num_systems), CUDA_NUM_THREADS>>>(
-        num_systems,
-        H_ptr,
-        g_ptr,
-        damping,
-        delta_theta_ptr
+        num_systems, H_ptr, g_ptr, damping, delta_theta_ptr
     );
     CUDA_CHECK(cudaGetLastError());
 }
@@ -1108,22 +998,8 @@ void NewtonKernels::compute_opacity_hessian_gradient_components_kernel_launcher(
     const torch::Tensor& dL_dc_pixelwise,
     const torch::Tensor& d2L_dc2_diag_pixelwise,
     torch::Tensor& out_H_sigma_base,
-    torch::Tensor& out_g_sigma_base) {
-    // This function would:
-    // 1. Prepare raw pointers from input tensors.
-    // 2. Launch CUDA kernel(s) to compute ∂c/∂σ_k. The paper states ∂²c/∂σ_k² = 0.
-    //    The formula for ∂c/∂σ_k involves terms like G_k, accumulated alpha from prior Gaussians,
-    //    the Gaussian's own color c_k, and the color accumulated from Gaussians behind it.
-    //    This requires careful handling of sorted Gaussians and their blended contributions.
-    // 3. Accumulate H_σ_base_k and g_σ_base_k for each visible Gaussian:
-    //    g_σ_base_k = sum_pixels [ (∂c/∂σ_k)ᵀ ⋅ (dL/dc) ]
-    //    H_σ_base_k = sum_pixels [ (∂c/∂σ_k)ᵀ ⋅ (d²L/dc²) ⋅ (∂c/∂σ_k) ]
-    // For now, it does nothing; out_H_sigma_base and out_g_sigma_base remain as initialized (e.g., zeros).
-    // if (options_debug_print_shapes_can_be_passed_here) { // Assuming a debug flag could be passed
-    //     printf("[STUB KERNEL LAUNCHER] compute_opacity_hessian_gradient_components_kernel_launcher called.\n");
-    // }
-    // This is a stub. A real implementation needs a kernel.
-    // For now, to avoid linker errors if called, we ensure outputs are zeroed if they are not already.
+    torch::Tensor& out_g_sigma_base
+) {
     if (out_H_sigma_base.defined()) out_H_sigma_base.zero_();
     if (out_g_sigma_base.defined()) out_g_sigma_base.zero_();
 }
@@ -1132,15 +1008,8 @@ void NewtonKernels::compute_opacity_hessian_gradient_components_kernel_launcher(
 
 torch::Tensor NewtonKernels::compute_sh_bases_kernel_launcher(
     int sh_degree,
-    const torch::Tensor& normalized_view_vectors) {
-    // This function would:
-    // 1. Prepare raw pointers.
-    // 2. Launch a CUDA kernel to evaluate SH basis functions B_k(r_k) for each view vector.
-    //    Output shape: [N_vis, (sh_degree+1)^2]
-    // For now, returns empty tensor or zeros of correct shape.
-    // if (options_debug_print_shapes_can_be_passed_here) {
-    //     printf("[STUB KERNEL LAUNCHER] compute_sh_bases_kernel_launcher called.\n");
-    // }
+    const torch::Tensor& normalized_view_vectors
+) {
     TORCH_CHECK(normalized_view_vectors.defined(), "normalized_view_vectors must be defined.");
     TORCH_CHECK(normalized_view_vectors.dim() == 2 && normalized_view_vectors.size(1) == 3,
                 "normalized_view_vectors must have shape [N, 3]. Got ", normalized_view_vectors.sizes());
@@ -1160,13 +1029,9 @@ torch::Tensor NewtonKernels::compute_sh_bases_kernel_launcher(
     float* sh_basis_output_ptr = gs::torch_utils::get_data_ptr<float>(sh_bases_tensor, "sh_bases_tensor");
 
     eval_sh_basis_kernel<<<GET_BLOCKS(num_points), CUDA_NUM_THREADS>>>(
-        num_points,
-        sh_degree,
-        dirs_ptr,
-        sh_basis_output_ptr
+        num_points, sh_degree, dirs_ptr, sh_basis_output_ptr
     );
     CUDA_CHECK(cudaGetLastError());
-
     return sh_bases_tensor;
 }
 
@@ -1187,21 +1052,9 @@ void NewtonKernels::compute_sh_hessian_gradient_components_kernel_launcher(
     const torch::Tensor& dL_dc_pixelwise,
     const torch::Tensor& d2L_dc2_diag_pixelwise,
     torch::Tensor& out_H_ck_diag,
-    torch::Tensor& out_g_ck) {
-    // This function would:
-    // 1. Prepare raw pointers.
-    // 2. Launch CUDA kernel(s) to compute Jacobian J_sh = ∂c_pixel/∂c_k (using sh_bases_values)
-    //    and then accumulate H_ck_base and g_ck_base.
-    //    Paper: ∂c_R/∂c_{k,R} = sum_{gaussians} G_k σ_k (Π(1-G_jσ_j)) B_{k,R}
-    //    If ∂²c_R/∂c_{k,R}² (direct part) = 0, then Hessian is J_sh^T * (d2L/dc2) * J_sh
-    // For now, it does nothing. out_H_ck_diag and out_g_ck remain as initialized.
-    // if (options_debug_print_shapes_can_be_passed_here) {
-    //     printf("[STUB KERNEL LAUNCHER] compute_sh_hessian_gradient_components_kernel_launcher called.\n");
-    // }
-    // This is a stub. A real implementation needs a kernel.
-    // For now, to avoid linker errors if called, we ensure outputs are zeroed.
+    torch::Tensor& out_g_ck
+) {
     if (out_H_ck_diag.defined()) out_H_ck_diag.zero_();
     if (out_g_ck.defined()) out_g_ck.zero_();
 }
-
-[end of kernels/newton_kernels.cu]
+} // namespace NewtonKernels

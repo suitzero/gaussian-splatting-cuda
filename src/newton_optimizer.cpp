@@ -295,7 +295,7 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
         verbose_tensor_check_lambda("model_snapshot.get_opacity()", model_snapshot.get_opacity(), "float");
         verbose_tensor_check_lambda("model_snapshot.get_shs()", model_snapshot.get_shs(), "float");
         verbose_tensor_check_lambda("view_mat_tensor", view_mat_tensor, "float");
-        verbose_tensor_check_lambda("K_matrix", K_matrix, "float");
+        verbose_tensor_check_lambda("P_perspective_tensor", P_perspective_tensor, "float"); // Corrected K_matrix to P_perspective_tensor
         verbose_tensor_check_lambda("cam_pos_tensor", cam_pos_tensor, "float");
         verbose_tensor_check_lambda("render_output.means2d", render_output.means2d, "float");
         verbose_tensor_check_lambda("render_output.depths", render_output.depths, "float");
