@@ -170,7 +170,7 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
         print_tensor_info("model_snapshot.get_opacity()", model_snapshot.get_opacity());
         print_tensor_info("model_snapshot.get_shs()", model_snapshot.get_shs());
         print_tensor_info("view_mat_tensor", view_mat_tensor);
-        print_tensor_info("K_matrix", K_matrix);
+        print_tensor_info("P_perspective_tensor", P_perspective_tensor); // Was K_matrix
         // cam_pos_tensor check will be after its definition
         print_tensor_info("render_output.means2d", render_output.means2d);
         print_tensor_info("render_output.depths", render_output.depths);
@@ -327,7 +327,7 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
         verbose_tensor_check_lambda("arg_opacities", arg_opacities, "float");
         verbose_tensor_check_lambda("arg_shs", arg_shs, "float");
         verbose_tensor_check_lambda("view_mat_tensor", view_mat_tensor, "float"); // Already local
-        verbose_tensor_check_lambda("K_matrix", K_matrix, "float"); // Already local
+        verbose_tensor_check_lambda("P_perspective_tensor", P_perspective_tensor, "float"); // Changed from K_matrix
         verbose_tensor_check_lambda("cam_pos_tensor", cam_pos_tensor, "float"); // Already local
         verbose_tensor_check_lambda("render_output.means2d", render_output.means2d, "float");
         verbose_tensor_check_lambda("render_output.depths", render_output.depths, "float");
@@ -345,10 +345,11 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
     const float* opacities_all_ptr = gs::torch_utils::get_const_data_ptr<float>(arg_opacities, "arg_opacities");
     const float* shs_all_ptr = gs::torch_utils::get_const_data_ptr<float>(arg_shs, "arg_shs");
     const float* view_matrix_ptr = gs::torch_utils::get_const_data_ptr<float>(view_mat_tensor, "view_mat_tensor");
-    const float* K_matrix_ptr = gs::torch_utils::get_const_data_ptr<float>(K_matrix, "K_matrix");
+    const float* perspective_proj_matrix_ptr = gs::torch_utils::get_const_data_ptr<float>(P_perspective_tensor, "P_perspective_tensor"); // Changed K_matrix_ptr
     const float* cam_pos_world_ptr = gs::torch_utils::get_const_data_ptr<float>(cam_pos_tensor, "cam_pos_tensor");
-    const float* means_2d_render_ptr = gs::torch_utils::get_const_data_ptr<float>(render_output.means2d, "render_output.means2d");
-    const float* depths_render_ptr = gs::torch_utils::get_const_data_ptr<float>(render_output.depths, "render_output.depths");
+    // means_2d_render_ptr, depths_render_ptr, radii_render_ptr are no longer passed to launcher
+    // const float* means_2d_render_ptr = gs::torch_utils::get_const_data_ptr<float>(render_output.means2d, "render_output.means2d");
+    // const float* depths_render_ptr = gs::torch_utils::get_const_data_ptr<float>(render_output.depths, "render_output.depths");
     const float* radii_render_ptr = gs::torch_utils::get_const_data_ptr<float>(radii_for_kernel_tensor, "radii_for_kernel_tensor");
     // No longer need visibility_mask_for_model_ptr here, pass the tensor directly
     const float* dL_dc_pixelwise_ptr = gs::torch_utils::get_const_data_ptr<float>(loss_derivs.dL_dc, "loss_derivs.dL_dc");
@@ -357,29 +358,26 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
     float* grad_p_output_ptr = gs::torch_utils::get_data_ptr<float>(grad_p_output, "grad_p_output");
 
     NewtonKernels::compute_position_hessian_components_kernel_launcher(
-        render_output.height, render_output.width, render_output.image.size(-1), // Image: H, W, C
-        p_total_for_kernel, // Total P Gaussians in model
+        render_output.height, render_output.width, static_cast<int>(render_output.image.size(-1)), // C_img
+        p_total_for_kernel,
         means_3d_all_ptr,
         scales_all_ptr,
         rotations_all_ptr,
         opacities_all_ptr,
         shs_all_ptr,
         model_snapshot.get_active_sh_degree(),
-        static_cast<int>(model_snapshot.get_shs().size(1)), // sh_coeffs_dim
+        static_cast<int>(model_snapshot.get_shs().size(1)), // This is sh_coeffs_per_color_channel
         view_matrix_ptr,
-        K_matrix_ptr,
+        perspective_proj_matrix_ptr, // Pass the 4x4 P matrix
         cam_pos_world_ptr,
-        means_2d_render_ptr,
-        depths_render_ptr,
-        radii_render_ptr,
-        static_cast<int>(render_output.means2d.defined() ? render_output.means2d.size(0) : 0), // P_render
-        visibility_mask_for_model, // Pass the tensor object directly
+        // Removed means_2d_render_ptr, depths_render_ptr, radii_render_ptr, P_render
+        visibility_mask_for_model,
         dL_dc_pixelwise_ptr,
         d2L_dc2_diag_pixelwise_ptr,
-        num_visible_gaussians_in_total_model, // Number of Gaussians to produce output for
+        num_visible_gaussians_in_total_model,
         H_p_output_packed_ptr,
         grad_p_output_ptr,
-        options_.debug_print_shapes // Pass the flag
+        options_.debug_print_shapes
     );
 
     return {H_p_output_packed, grad_p_output};
@@ -825,7 +823,7 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_scale_updates_ne
         model_, // Pass relevant parts of model or specific tensors
         visible_indices,
         view_mat_tensor, // Need view_mat from primary_camera
-        K_matrix,        // Need K from primary_camera
+    //    K_intrinsic_tensor, // Need K from primary_camera (actual intrinsics)
         cam_pos_world,   // Need cam_pos from primary_camera
         render_output,   // For tile iterators, etc.
         loss_derivs.dL_dc,
@@ -926,7 +924,7 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_rotation_updates
         model_, // or specific tensors: means, scales, rotations, opacities, shs
         visible_indices,
         r_k_vecs, // Axis of rotation for each Gaussian
-        primary_camera, // For full view, projection matrices if needed by ∂Σ_k/∂θ_k
+    //    primary_camera, // For full view, projection matrices if needed by ∂Σ_k/∂θ_k (using P_perspective_tensor)
         render_output,
         loss_derivs.dL_dc,
         loss_derivs.d2L_dc2_diag,
@@ -1171,7 +1169,7 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_sh_updates_newto
             model_.get_active_sh_degree(),
             sh_bases_values, // Pass evaluated SH bases
             camera.world_view_transform().to(device), // view_matrix
-            camera.K().to(device), // K_matrix
+    //    camera.K().to(device), // K_intrinsic_tensor
             render_output,
             visible_indices, // visible_indices from the function argument
             loss_derivs.dL_dc,
