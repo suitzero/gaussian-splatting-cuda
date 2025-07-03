@@ -927,7 +927,87 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_sh_updates_newto
     const Camera& camera, // Needed for view direction r_k for SH basis B_k
     const gs::RenderOutput& render_output) {
 
-    if (options_.debug_print_shapes) std::cout << "[NewtonOpt] STUB: compute_sh_updates_newton called." << std::endl;
+    if (options_.debug_print_shapes) std::cout << "[NewtonOpt] STUB: compute_sh_updates_newton called for " << visible_indices.numel() << " Gaussians." << std::endl;
+
+    if (visible_indices.numel() == 0) {
+        return AttributeUpdateOutput(torch::empty({0}, model_.get_shs().options()), true);
+    }
+
+    // --- Get necessary data ---
+    const torch::Tensor current_shs = model_.get_shs().index_select(0, visible_indices).detach(); // [N_vis, (deg+1)^2, 3]
+    const torch::Tensor current_means = model_.get_means().index_select(0, visible_indices).detach(); // For r_k
+
+    int num_vis_gaussians = static_cast<int>(visible_indices.numel());
+    int sh_dim_flat = static_cast<int>(current_shs.size(1) * current_shs.size(2)); // (deg+1)^2 * 3
+    auto tensor_opts_float = current_shs.options();
+    auto device = current_shs.device();
+
+    // Compute view directions r_k = p_k - C_w
+    torch::Tensor view_mat_tensor = camera.world_view_transform().to(tensor_opts_float.device()).contiguous();
+    torch::Tensor view_mat_2d = view_mat_tensor.select(0,0);
+    torch::Tensor R_wc_2d = view_mat_2d.slice(0,0,3).slice(1,0,3);
+    torch::Tensor t_wc_2d = view_mat_2d.slice(0,0,3).slice(1,3,4);
+    torch::Tensor cam_pos_world = -torch::matmul(R_wc_2d.t(), t_wc_2d).squeeze(); // [3]
+    torch::Tensor r_k_vecs = current_means - cam_pos_world.unsqueeze(0); // [N_vis, 3]
+    torch::Tensor r_k_vecs_normalized = torch::nn::functional::normalize(r_k_vecs, torch::nn::functional::NormalizeFuncOptions().dim(1).eps(1e-9));
+
+
+    // --- Placeholder outputs from conceptual CUDA kernels ---
+    // H_ck: [N_vis, sh_dim_flat, sh_dim_flat] (block diagonal, or flattened for batched solve)
+    // g_ck: [N_vis, sh_dim_flat]
+    // The paper optimizes per color component, and ∂²c_R/∂c_{k,R}² = 0 for direct color.
+    // This implies H_ck might be simpler, possibly diagonal or block-diagonal per channel.
+    // For now, let's assume a general solve for a flattened sh_dim_flat vector per Gaussian.
+    // A more precise implementation would handle the per-channel decoupling.
+    // The size of the system per Gaussian is ((deg+1)^2) x ((deg+1)^2) for each of R,G,B channels.
+
+    int sh_coeffs_per_channel = static_cast<int>(current_shs.size(1)); // (deg+1)^2
+    // For H_ck, if decoupled per channel, it's 3 blocks of [N_vis, sh_coeffs_per_channel, sh_coeffs_per_channel]
+    // Or, if solving all SH coeffs together: [N_vis, sh_dim_flat, sh_dim_flat]
+    // For simplicity in stub, let's assume we get a flattened gradient and a diagonal Hessian.
+    torch::Tensor H_ck_diag = torch::ones({num_vis_gaussians, sh_dim_flat}, tensor_opts_float); // Placeholder: Identity Hessian
+    torch::Tensor g_ck = torch::zeros({num_vis_gaussians, sh_dim_flat}, tensor_opts_float);
+
+
+    // Conceptual CUDA kernel calls:
+    // 1. Kernel to compute SH basis functions B_k(r_k) for each visible Gaussian.
+    //    Output: sh_bases [N_vis, (deg+1)^2]
+    /*
+    torch::Tensor sh_bases = NewtonKernels::compute_sh_bases_kernel_launcher(
+        model_.get_active_sh_degree(), r_k_vecs_normalized);
+    */
+
+    // 2. Kernel to compute Jacobian J_sh = ∂c_pixel/∂c_k and then accumulate H_ck_base and g_ck_base.
+    //    J_sh_pixel_channel = G_k * σ_k * (Π_alpha_front) * B_k_channel_coeff
+    //    Paper: ∂c_R/∂c_{k,R} = sum_{gaussians} G_k σ_k (Π(1-G_jσ_j)) B_{k,R} (this is ∂(final_pixel_R)/∂(sh_coeff_R_for_gaussian_k))
+    //    If ∂²c_R/∂c_{k,R}² (direct part) = 0, then Hessian is J_sh^T * (d2L/dc2) * J_sh
+    /*
+    NewtonKernels::compute_sh_hessian_gradient_components_kernel_launcher(
+        render_output.height, render_output.width, render_output.image.size(-1),
+        model_, visible_indices, sh_bases, // Pass evaluated SH bases
+        camera, render_output, // For view info, tile iterators, accumulated alpha etc.
+        loss_derivs.dL_dc,
+        loss_derivs.d2L_dc2_diag,
+        H_ck_diag, // Output (e.g., diagonal of Hessian)
+        g_ck       // Output
+    );
+    */
+    // For now, H_ck_diag and g_ck are zeros/ones.
+
+
+    // --- Solve the linear system H_ck * Δc_k = -g_ck ---
+    // If H_ck is diagonal: Δc_k_i = -g_ck_i / (H_ck_diag_i + damping)
+    torch::Tensor delta_shs_flat = torch::zeros_like(g_ck);
+    if (g_ck.numel() > 0) {
+        delta_shs_flat = -g_ck / (H_ck_diag + options_.damping); // Element-wise for diagonal Hessian
+        delta_shs_flat = options_.step_scale * delta_shs_flat;
+        delta_shs_flat.nan_to_num_(0.0, 0.0, 0.0);
+    }
+
+    // Reshape delta_shs_flat [N_vis, sh_dim_flat] back to [N_vis, (deg+1)^2, 3]
+    torch::Tensor delta_shs = delta_shs_flat.reshape(current_shs.sizes());
+
+
     // TODO: Implement paper's "Color solve"
     // 1. Get current SHs: model_.get_shs().index_select(0, visible_indices)
     // 2. Compute ∂c_R/∂c_{k,R} (paper says ∂²c_R/∂c_{k,R}² = 0), per channel.
