@@ -1029,7 +1029,7 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_sh_updates_newto
     // A more precise implementation would handle the per-channel decoupling.
     // The size of the system per Gaussian is ((deg+1)^2) x ((deg+1)^2) for each of R,G,B channels.
 
-    int sh_coeffs_per_channel = static_cast<int>(current_shs.size(1)); // (deg+1)^2
+    int sh_coeffs_per_channel = static_cast<int>(current_shs_for_opt.size(1)); // (deg+1)^2 // Corrected variable name
     // For H_ck, if decoupled per channel, it's 3 blocks of [N_vis, sh_coeffs_per_channel, sh_coeffs_per_channel]
     // Or, if solving all SH coeffs together: [N_vis, sh_dim_flat, sh_dim_flat]
     // For simplicity in stub, let's assume we get a flattened gradient and a diagonal Hessian.
