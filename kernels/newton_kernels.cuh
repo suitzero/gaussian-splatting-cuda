@@ -208,5 +208,44 @@ void compute_opacity_hessian_gradient_components_kernel_launcher(
     torch::Tensor& out_g_sigma_base  // [N_vis] (scalar base gradient for opacity)
 );
 
+// --- Launchers for SH (Color) Optimization (Placeholders) ---
+
+// Evaluates SH basis functions for given view directions
+// Output: sh_bases_values [N_vis, num_sh_coeffs]
+torch::Tensor compute_sh_bases_kernel_launcher(
+    int sh_degree,
+    const torch::Tensor& normalized_view_vectors // [N_vis, 3] (r_k_normalized)
+);
+
+// Computes Hessian and gradient components for SH coefficients c_k
+// Note: Paper states ∂²c_R/∂c_{k,R}² = 0 for direct color contribution, simplifying H_ck.
+// H_ck might be diagonal or block-diagonal per channel. This launcher outputs diagonal for simplicity.
+void compute_sh_hessian_gradient_components_kernel_launcher(
+    // Image dimensions
+    int H_img, int W_img, int C_img,
+    // Model data
+    int P_total,
+    const torch::Tensor& means_all,
+    const torch::Tensor& scales_all,
+    const torch::Tensor& rotations_all,
+    const torch::Tensor& opacities_all,
+    const torch::Tensor& shs_all, // Current SH coeffs [P_total, (deg+1)^2, 3]
+    int sh_degree,
+    const torch::Tensor& sh_bases_values, // Precomputed from compute_sh_bases_kernel_launcher [N_vis, (deg+1)^2]
+    // Camera
+    const torch::Tensor& view_matrix,
+    const torch::Tensor& K_matrix,
+    // Render output (for tile iterators, accumulated alpha etc.)
+    const gs::RenderOutput& render_output,
+    // Visibility
+    const torch::Tensor& visible_indices, // [N_vis]
+    // Loss derivatives
+    const torch::Tensor& dL_dc_pixelwise,
+    const torch::Tensor& d2L_dc2_diag_pixelwise,
+    // Output arrays (for visible Gaussians)
+    torch::Tensor& out_H_ck_diag, // [N_vis, num_sh_coeffs_flat] (diagonal of Hessian for SH coeffs)
+    torch::Tensor& out_g_ck       // [N_vis, num_sh_coeffs_flat] (gradient for SH coeffs)
+);
+
 
 } // namespace NewtonKernels

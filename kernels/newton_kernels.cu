@@ -597,6 +597,55 @@ void NewtonKernels::compute_opacity_hessian_gradient_components_kernel_launcher(
     // }
 }
 
+// --- Definitions for SH (Color) Optimization Launchers (Stubs) ---
+
+torch::Tensor NewtonKernels::compute_sh_bases_kernel_launcher(
+    int sh_degree,
+    const torch::Tensor& normalized_view_vectors) {
+    // This function would:
+    // 1. Prepare raw pointers.
+    // 2. Launch a CUDA kernel to evaluate SH basis functions B_k(r_k) for each view vector.
+    //    Output shape: [N_vis, (sh_degree+1)^2]
+    // For now, returns empty tensor or zeros of correct shape.
+    // if (options_debug_print_shapes_can_be_passed_here) {
+    //     printf("[STUB KERNEL LAUNCHER] compute_sh_bases_kernel_launcher called.\n");
+    // }
+    if (normalized_view_vectors.numel() == 0) {
+        return torch::empty({0, (sh_degree + 1) * (sh_degree + 1)}, normalized_view_vectors.options());
+    }
+    return torch::zeros({normalized_view_vectors.size(0), (sh_degree + 1) * (sh_degree + 1)}, normalized_view_vectors.options());
+}
+
+void NewtonKernels::compute_sh_hessian_gradient_components_kernel_launcher(
+    int H_img, int W_img, int C_img,
+    int P_total,
+    const torch::Tensor& means_all,
+    const torch::Tensor& scales_all,
+    const torch::Tensor& rotations_all,
+    const torch::Tensor& opacities_all,
+    const torch::Tensor& shs_all,
+    int sh_degree,
+    const torch::Tensor& sh_bases_values,
+    const torch::Tensor& view_matrix,
+    const torch::Tensor& K_matrix,
+    const gs::RenderOutput& render_output,
+    const torch::Tensor& visible_indices,
+    const torch::Tensor& dL_dc_pixelwise,
+    const torch::Tensor& d2L_dc2_diag_pixelwise,
+    torch::Tensor& out_H_ck_diag,
+    torch::Tensor& out_g_ck) {
+    // This function would:
+    // 1. Prepare raw pointers.
+    // 2. Launch CUDA kernel(s) to compute Jacobian J_sh = ∂c_pixel/∂c_k (using sh_bases_values)
+    //    and then accumulate H_ck_base and g_ck_base.
+    //    Paper: ∂c_R/∂c_{k,R} = sum_{gaussians} G_k σ_k (Π(1-G_jσ_j)) B_{k,R}
+    //    If ∂²c_R/∂c_{k,R}² (direct part) = 0, then Hessian is J_sh^T * (d2L/dc2) * J_sh
+    // For now, it does nothing. out_H_ck_diag and out_g_ck remain as initialized.
+    // if (options_debug_print_shapes_can_be_passed_here) {
+    //     printf("[STUB KERNEL LAUNCHER] compute_sh_hessian_gradient_components_kernel_launcher called.\n");
+    // }
+}
+
 
 // Make sure torch_utils.hpp has these definitions or similar:
 // namespace gs { namespace torch_utils {
