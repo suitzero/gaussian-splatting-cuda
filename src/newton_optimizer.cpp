@@ -1,5 +1,5 @@
 // src/newton_optimizer.cpp
-#include "newton_optimizer.hpp" // Moved from core/
+#include "core/newton_optimizer.hpp" 
 #include "kernels/newton_kernels.cuh" // Path relative to include paths, or needs adjustment
 #include "core/torch_utils.hpp" // Assuming torch_utils is still in core/
 
