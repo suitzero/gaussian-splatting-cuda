@@ -145,6 +145,39 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
     // If render_output.radii was undefined, radii_for_kernel_tensor remains undefined.
     // get_const_data_ptr will handle undefined tensor by returning nullptr.
 
+    // Moved p_total_for_kernel definition and try-catch block earlier
+    int p_total_for_kernel = 0;
+    try {
+        // This directly calls model_snapshot.size() which is model_snapshot._means.size(0)
+        // Ensure means is defined before trying to access its size for p_total_for_kernel
+        if (model_snapshot.get_means().defined()) {
+            p_total_for_kernel = static_cast<int>(model_snapshot.size());
+            if (options_.debug_print_shapes) {
+                std::cout << "[NewtonOpt POS_HESS] model_snapshot.size() call successful. P_total_for_kernel = " << p_total_for_kernel << std::endl;
+            }
+        } else {
+            if (options_.debug_print_shapes) {
+                std::cout << "[NewtonOpt POS_HESS] model_snapshot.get_means() is UNDEFINED. Cannot call .size(). Setting P_total_for_kernel to 0." << std::endl;
+            }
+            // p_total_for_kernel remains 0, or handle as an error
+        }
+    } catch (const c10::Error& e) {
+        if (options_.debug_print_shapes) {
+            std::cout << "[NewtonOpt POS_HESS] model_snapshot.size() call FAILED (c10::Error): " << e.what_without_backtrace() << std::endl;
+        }
+        throw;
+    } catch (const std::exception& e) {
+        if (options_.debug_print_shapes) {
+            std::cout << "[NewtonOpt POS_HESS] model_snapshot.size() call FAILED (std::exception): " << e.what() << std::endl;
+        }
+        throw;
+    } catch (...) {
+        if (options_.debug_print_shapes) {
+            std::cout << "[NewtonOpt POS_HESS] model_snapshot.size() call FAILED (unknown exception)." << std::endl;
+        }
+        throw;
+    }
+
     // Define the verbose checker lambda (only if debug_print_shapes is on)
     std::function<void(const std::string&, const torch::Tensor&, const std::string&)> verbose_tensor_check_lambda;
     if (options_.debug_print_shapes) {
@@ -228,7 +261,7 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
 
     NewtonKernels::compute_position_hessian_components_kernel_launcher(
         render_output.height, render_output.width, render_output.image.size(-1), // Image: H, W, C
-        static_cast<int>(model_snapshot.size()), // Total P Gaussians in model
+        p_total_for_kernel, // Total P Gaussians in model
         means_3d_all_ptr,
         scales_all_ptr,
         rotations_all_ptr,
@@ -437,6 +470,25 @@ void NewtonOptimizer::step(int iteration,
     );
 
     // II. Compute Hessian components (H_p, g_p) for primary target
+    if (options_.debug_print_shapes) {
+        std::cout << "[NewtonOpt STEP] Checking this->model_ BEFORE call to compute_position_hessian_components_cuda:" << std::endl;
+        const SplatData& model_ref_in_step = this->model_;
+        std::cout << "  - model_ref_in_step.get_means().defined(): " << model_ref_in_step.get_means().defined() << std::endl;
+        if (model_ref_in_step.get_means().defined()) {
+            std::cout << "  - model_ref_in_step.get_means().sizes(): " << model_ref_in_step.get_means().sizes() << std::endl;
+            try {
+                std::cout << "  - model_ref_in_step.size() direct call: " << model_ref_in_step.size() << std::endl;
+            } catch (const c10::Error& e) {
+                std::cout << "  - model_ref_in_step.size() direct call: FAILED with c10::Error: " << e.what_without_backtrace() << std::endl;
+            } catch (const std::exception& e) {
+                std::cout << "  - model_ref_in_step.size() direct call: FAILED with std::exception: " << e.what() << std::endl;
+            } catch (...) {
+                std::cout << "  - model_ref_in_step.size() direct call: FAILED with unknown exception." << std::endl;
+            }
+        } else {
+            std::cout << "  - model_ref_in_step.get_means() is UNDEFINED." << std::endl;
+        }
+    }
     PositionHessianOutput primary_hess_output = compute_position_hessian_components_cuda(
         model_, visibility_mask_for_model, primary_camera, current_render_output, primary_loss_derivs, num_visible_gaussians_in_model
     );
