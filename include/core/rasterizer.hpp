@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Ops.h"
+#include "gsplat/Ops.h" // Changed to direct path assuming 'gsplat' is findable from a root include dir
 #include "core/camera.hpp"
 #include "core/splat_data.hpp"
 #include <torch/torch.h>
