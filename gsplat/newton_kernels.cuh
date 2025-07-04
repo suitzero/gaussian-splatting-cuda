@@ -40,12 +40,13 @@ void compute_position_hessian_components_kernel_launcher(
     const float* projection_matrix_for_jacobian, // Typically K matrix [3,3] or [4,4]
     const float* cam_pos_world,
     // Data from RenderOutput (for Gaussians processed by rasterizer, potentially culled)
-    // const float* means_2d_render,  // [P_render, 2] // Removed, kernel does full iteration
-    // const float* depths_render,   // [P_render] // Removed
-    // const float* radii_render,    // [P_render] // Removed
-    // int P_render, // Removed
+    const float* means_2d_render,  // [P_render, 2]
+    const float* depths_render,   // [P_render]
+    const float* radii_render,    // [P_render]
+    // visibility_indices_in_render_output (ranks) removed, P_render is the size of above arrays.
+    int P_render,
     // Visibility mask for *all* Gaussians in the model [P_total]. True if Gaussian k is visible on screen.
-    const torch::Tensor& visibility_mask_for_model_tensor,
+    const torch::Tensor& visibility_mask_for_model_tensor, // Changed from const bool*
     // Loss derivatives (pixel-wise)
     const float* dL_dc_pixelwise,          // [H, W, C_img]
     const float* d2L_dc2_diag_pixelwise,   // [H, W, C_img]
@@ -233,7 +234,7 @@ void compute_sh_hessian_gradient_components_kernel_launcher(
     const torch::Tensor& sh_bases_values, // Precomputed from compute_sh_bases_kernel_launcher [N_vis, (deg+1)^2]
     // Camera
     const torch::Tensor& view_matrix,
-    const torch::Tensor& proj_param_for_sh_hess, //13 Renamed from K_matrix for debugging C2660
+    const torch::Tensor& K_matrix,
     // Render output (for tile iterators, accumulated alpha etc.)
     const gs::RenderOutput& render_output,
     // Visibility

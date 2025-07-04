@@ -1,7 +1,7 @@
 // src/newton_optimizer.cpp
 #include "core/newton_optimizer.hpp" 
-#include "newton_kernels.cuh" // Updated path: newton_kernels.cuh is now in gsplat_backend/include
-#include "core/torch_utils.hpp"
+#include "kernels/newton_kernels.cuh" // Path relative to include paths, or needs adjustment
+#include "core/torch_utils.hpp" // Assuming torch_utils is still in core/
 #include <iostream> // For std::cout debug prints
 
 // Constructor
@@ -56,81 +56,9 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
     torch::Tensor grad_p_output = torch::zeros({num_visible_gaussians_in_total_model, 3}, tensor_opts);
 
     // Prepare camera parameters
-    torch::Tensor view_mat_tensor_orig = camera.world_view_transform().to(dev).to(dtype); // World to Camera
-    torch::Tensor view_mat_tensor = view_mat_tensor_orig.contiguous();
-
-    // Construct Perspective Projection Matrix (P) from K (intrinsics)
-    // K = [fx 0 cx]
-    //     [0 fy cy]
-    //     [0  0  1]
-    // P needs image width, height, near, far.
-    // Assuming standard OpenGL perspective projection for a right-handed system (camera looks down -Z)
-    // and outputs to NDC cube [-1, 1]^3.
-    float near_plane = options_.debug_print_shapes ? 0.1f : 0.01f; // typical near, or from camera if available
-    float far_plane = options_.debug_print_shapes ? 1000.0f : 100.0f;  // typical far, or from camera if available
-
-    torch::Tensor K_intrinsic_tensor = camera.K().to(dev).to(dtype).contiguous(); // fx, fy, cx, cy are here
-    float fx = K_intrinsic_tensor.defined() && K_intrinsic_tensor.numel() >=4 ? K_intrinsic_tensor[0][0].item<float>() : 500.0f; // Default placeholder
-    float fy = K_intrinsic_tensor.defined() && K_intrinsic_tensor.numel() >=4 ? K_intrinsic_tensor[1][1].item<float>() : 500.0f;
-    float cx = K_intrinsic_tensor.defined() && K_intrinsic_tensor.numel() >=4 ? K_intrinsic_tensor[0][2].item<float>() : static_cast<float>(render_output.width) / 2.0f;
-    float cy = K_intrinsic_tensor.defined() && K_intrinsic_tensor.numel() >=4 ? K_intrinsic_tensor[1][2].item<float>() : static_cast<float>(render_output.height) / 2.0f;
-
-    // Create perspective projection matrix P (assuming column-major to match some conventions, then transpose if needed, or fill row-major)
-    // OpenGL standard projection (row-major):
-    // [2N/W  0    (W-2cx)/W  0]
-    // [0     2N/H  (H-2cy)/H  0]
-    // [0     0    -(F+N)/(F-N) -2FN/(F-N)]
-    // [0     0    -1          0]
-    // W = render_output.width, H = render_output.height, N=near, F=far
-    // However, the kernel's projection Jacobian math (Eq A.1) uses PW_i which implies PW is a single matrix.
-    // The K_matrix in the C++ code was passed as projection_matrix_for_jacobian.
-    // The kernel's ProjectionDerivs::compute_projection_jacobian and hessian expect a 4x4 PW matrix.
-    // The original gsplat code uses a full projection matrix (derived from K, width, height, near, far)
-    // for its `gsplat::project_gaussians_forward_cuda`.
-    // Let's build a full 4x4 perspective projection matrix P.
-    // And the kernel will compute PW = P * V.
-    // The `projection_matrix_for_jacobian` argument to the kernel should be this P.
-
-    torch::Tensor P_perspective_tensor = torch::zeros({4, 4}, tensor_opts);
-    if (render_output.width > 0 && render_output.height > 0 && (far_plane - near_plane) > 1e-5) {
-        float img_W = static_cast<float>(render_output.width);
-        float img_H = static_cast<float>(render_output.height);
-        // Using OpenGL projection matrix formula (row-major)
-        // Corrected based on common OpenGL projection matrix, assuming cx,cy are pixel coords from top-left
-        // and NDC is [-1,1] with Y up.
-        // If K provides fx,fy in pixels, and cx,cy are principal point in pixels from top-left:
-        P_perspective_tensor[0][0] = 2.0f * fx / img_W;
-        P_perspective_tensor[0][2] = (img_W - 2.0f * cx) / img_W; // or (2.0f * cx / img_W - 1.0f) if cx is from left edge, and positive X is right in NDC
-        P_perspective_tensor[1][1] = 2.0f * fy / img_H;
-        P_perspective_tensor[1][2] = (img_H - 2.0f * cy) / img_H; // or (2.0f * cy / img_H - 1.0f) if cy is from top edge, and positive Y is up in NDC
-                                                              // If cy is from bottom, it might be (1.0f - 2.0f*cy/img_H)
-                                                              // Let's use a common one: (2*cx/W - 1) and (2*cy/H - 1) then negate cy term if Y is down in image space
-                                                              // For now, using (W-2cx)/W etc. which assumes cx,cy are relative to an origin that needs careful check.
-                                                              // Simpler: if cx,cy are principal point from image center, then P[0][2]=0, P[1][2]=0
-                                                              // Given typical K, cx,cy are from top-left.
-                                                              // A common form for OpenGL:
-                                                              // P[0][0] = 2*fx/W; P[0][2] = 1 - 2*cx/W; (or -(2*cx/W -1))
-                                                              // P[1][1] = 2*fy/H; P[1][2] = 1 - 2*cy/H; (or -(2*cy/H -1), often fy is negative if image Y is down)
-                                                              // Let's use the gsplat convention if K is from there.
-                                                              // For now, a standard perspective matrix:
-        P_perspective_tensor[0][0] = 2.0f * fx / img_W;
-        // P_perspective_tensor[0][2] = (2.0f * cx - img_W) / img_W; // If cx is from left, P[0][2] maps principal point to 0
-        P_perspective_tensor[1][1] = 2.0f * fy / img_H;
-        // P_perspective_tensor[1][2] = (img_H - 2.0f * cy) / img_H; // If cy from top, P[1][2] maps principal point to 0, but Y is inverted
-                                                                    // If K already handles y-down, fy might be negative.
-                                                                    // For safety, using a simplified one that assumes cx,cy are near center.
-                                                                    // The actual gsplat might use a specific form.
-                                                                    // The kernel's projection jacobian assumes PW is the final matrix.
-
-        P_perspective_tensor[2][2] = -(far_plane + near_plane) / (far_plane - near_plane);
-        P_perspective_tensor[2][3] = -(2.0f * far_plane * near_plane) / (far_plane - near_plane);
-        P_perspective_tensor[3][2] = -1.0f;
-    } else {
-        // Fallback to identity or error if dimensions are zero
-        P_perspective_tensor = torch::eye(4, tensor_opts);
-    }
-    P_perspective_tensor = P_perspective_tensor.contiguous();
-
+    torch::Tensor view_mat_tensor_orig = camera.world_view_transform().to(dev).to(dtype); // Corrected method
+    torch::Tensor view_mat_tensor = view_mat_tensor_orig.contiguous(); // Ensure contiguity
+    torch::Tensor K_matrix = camera.K().to(dev).to(dtype).contiguous(); // Also ensure K_matrix is contiguous
 
     // Compute camera center C_w = -R_wc^T * t_wc from world_view_transform V = [R_wc | t_wc]
     // V is typically [4,4] or [3,4]. Assuming [4,4] world-to-camera.
@@ -170,7 +98,7 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
         print_tensor_info("model_snapshot.get_opacity()", model_snapshot.get_opacity());
         print_tensor_info("model_snapshot.get_shs()", model_snapshot.get_shs());
         print_tensor_info("view_mat_tensor", view_mat_tensor);
-        print_tensor_info("P_perspective_tensor", P_perspective_tensor); // Was K_matrix
+        print_tensor_info("K_matrix", K_matrix);
         // cam_pos_tensor check will be after its definition
         print_tensor_info("render_output.means2d", render_output.means2d);
         print_tensor_info("render_output.depths", render_output.depths);
@@ -295,7 +223,7 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
         verbose_tensor_check_lambda("model_snapshot.get_opacity()", model_snapshot.get_opacity(), "float");
         verbose_tensor_check_lambda("model_snapshot.get_shs()", model_snapshot.get_shs(), "float");
         verbose_tensor_check_lambda("view_mat_tensor", view_mat_tensor, "float");
-        verbose_tensor_check_lambda("P_perspective_tensor", P_perspective_tensor, "float"); // Corrected K_matrix to P_perspective_tensor
+        verbose_tensor_check_lambda("K_matrix", K_matrix, "float");
         verbose_tensor_check_lambda("cam_pos_tensor", cam_pos_tensor, "float");
         verbose_tensor_check_lambda("render_output.means2d", render_output.means2d, "float");
         verbose_tensor_check_lambda("render_output.depths", render_output.depths, "float");
@@ -327,7 +255,7 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
         verbose_tensor_check_lambda("arg_opacities", arg_opacities, "float");
         verbose_tensor_check_lambda("arg_shs", arg_shs, "float");
         verbose_tensor_check_lambda("view_mat_tensor", view_mat_tensor, "float"); // Already local
-        verbose_tensor_check_lambda("P_perspective_tensor", P_perspective_tensor, "float"); // Changed from K_matrix
+        verbose_tensor_check_lambda("K_matrix", K_matrix, "float"); // Already local
         verbose_tensor_check_lambda("cam_pos_tensor", cam_pos_tensor, "float"); // Already local
         verbose_tensor_check_lambda("render_output.means2d", render_output.means2d, "float");
         verbose_tensor_check_lambda("render_output.depths", render_output.depths, "float");
@@ -345,11 +273,10 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
     const float* opacities_all_ptr = gs::torch_utils::get_const_data_ptr<float>(arg_opacities, "arg_opacities");
     const float* shs_all_ptr = gs::torch_utils::get_const_data_ptr<float>(arg_shs, "arg_shs");
     const float* view_matrix_ptr = gs::torch_utils::get_const_data_ptr<float>(view_mat_tensor, "view_mat_tensor");
-    const float* perspective_proj_matrix_ptr = gs::torch_utils::get_const_data_ptr<float>(P_perspective_tensor, "P_perspective_tensor"); // Changed K_matrix_ptr
+    const float* K_matrix_ptr = gs::torch_utils::get_const_data_ptr<float>(K_matrix, "K_matrix");
     const float* cam_pos_world_ptr = gs::torch_utils::get_const_data_ptr<float>(cam_pos_tensor, "cam_pos_tensor");
-    // means_2d_render_ptr, depths_render_ptr, radii_render_ptr are no longer passed to launcher
-    // const float* means_2d_render_ptr = gs::torch_utils::get_const_data_ptr<float>(render_output.means2d, "render_output.means2d");
-    // const float* depths_render_ptr = gs::torch_utils::get_const_data_ptr<float>(render_output.depths, "render_output.depths");
+    const float* means_2d_render_ptr = gs::torch_utils::get_const_data_ptr<float>(render_output.means2d, "render_output.means2d");
+    const float* depths_render_ptr = gs::torch_utils::get_const_data_ptr<float>(render_output.depths, "render_output.depths");
     const float* radii_render_ptr = gs::torch_utils::get_const_data_ptr<float>(radii_for_kernel_tensor, "radii_for_kernel_tensor");
     // No longer need visibility_mask_for_model_ptr here, pass the tensor directly
     const float* dL_dc_pixelwise_ptr = gs::torch_utils::get_const_data_ptr<float>(loss_derivs.dL_dc, "loss_derivs.dL_dc");
@@ -358,26 +285,29 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
     float* grad_p_output_ptr = gs::torch_utils::get_data_ptr<float>(grad_p_output, "grad_p_output");
 
     NewtonKernels::compute_position_hessian_components_kernel_launcher(
-        render_output.height, render_output.width, static_cast<int>(render_output.image.size(-1)), // C_img
-        p_total_for_kernel,
+        render_output.height, render_output.width, render_output.image.size(-1), // Image: H, W, C
+        p_total_for_kernel, // Total P Gaussians in model
         means_3d_all_ptr,
         scales_all_ptr,
         rotations_all_ptr,
         opacities_all_ptr,
         shs_all_ptr,
         model_snapshot.get_active_sh_degree(),
-        static_cast<int>(model_snapshot.get_shs().size(1)), // This is sh_coeffs_per_color_channel
+        static_cast<int>(model_snapshot.get_shs().size(1)), // sh_coeffs_dim
         view_matrix_ptr,
-        perspective_proj_matrix_ptr, // Pass the 4x4 P matrix
+        K_matrix_ptr,
         cam_pos_world_ptr,
-        // Removed means_2d_render_ptr, depths_render_ptr, radii_render_ptr, P_render
-        visibility_mask_for_model,
+        means_2d_render_ptr,
+        depths_render_ptr,
+        radii_render_ptr,
+        static_cast<int>(render_output.means2d.defined() ? render_output.means2d.size(0) : 0), // P_render
+        visibility_mask_for_model, // Pass the tensor object directly
         dL_dc_pixelwise_ptr,
         d2L_dc2_diag_pixelwise_ptr,
-        num_visible_gaussians_in_total_model,
+        num_visible_gaussians_in_total_model, // Number of Gaussians to produce output for
         H_p_output_packed_ptr,
         grad_p_output_ptr,
-        options_.debug_print_shapes
+        options_.debug_print_shapes // Pass the flag
     );
 
     return {H_p_output_packed, grad_p_output};
@@ -823,7 +753,7 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_scale_updates_ne
         model_, // Pass relevant parts of model or specific tensors
         visible_indices,
         view_mat_tensor, // Need view_mat from primary_camera
-    //    K_intrinsic_tensor, // Need K from primary_camera (actual intrinsics)
+        K_matrix,        // Need K from primary_camera
         cam_pos_world,   // Need cam_pos from primary_camera
         render_output,   // For tile iterators, etc.
         loss_derivs.dL_dc,
@@ -924,7 +854,7 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_rotation_updates
         model_, // or specific tensors: means, scales, rotations, opacities, shs
         visible_indices,
         r_k_vecs, // Axis of rotation for each Gaussian
-    //    primary_camera, // For full view, projection matrices if needed by ∂Σ_k/∂θ_k (using P_perspective_tensor)
+        primary_camera, // For full view, projection matrices if needed by ∂Σ_k/∂θ_k
         render_output,
         loss_derivs.dL_dc,
         loss_derivs.d2L_dc2_diag,
@@ -1169,7 +1099,7 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_sh_updates_newto
             model_.get_active_sh_degree(),
             sh_bases_values, // Pass evaluated SH bases
             camera.world_view_transform().to(device), // view_matrix
-    //    camera.K().to(device), // K_intrinsic_tensor
+            camera.K().to(device), // K_matrix
             render_output,
             visible_indices, // visible_indices from the function argument
             loss_derivs.dL_dc,

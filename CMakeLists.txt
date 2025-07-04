@@ -61,8 +61,7 @@ configure_file(
 )
 
 add_subdirectory(external)
-add_subdirectory(gsplat)
-add_subdirectory(gsplat_backend) # Added new backend subdirectory
+add_subdirectory(gsplat) # newton_optimizer and newton_kernels will be part of this target
 
 # =============================================================================
 # HOST LIBRARY - Compiled with g++ (fast!)
@@ -116,7 +115,7 @@ target_link_libraries(gaussian_host
         Threads::Threads
         args
         Python3::Python
-        gsplat_backend  # Link to gsplat
+        gsplat          # Link to gsplat (was gsplat_backend)
         ${OPENGL_LIBRARIES}
         CUDA::cudart    # Add CUDA runtime for interop
 )
@@ -290,7 +289,7 @@ target_include_directories(${PROJECT_NAME}
 set(MAIN_LINK_LIBRARIES
         gaussian_host
         gaussian_kernels
-        gsplat_backend
+        gsplat          # Was gsplat_backend
         Python3::Python
         ${OPENGL_LIBRARIES}
         CUDA::cudart
@@ -407,7 +406,7 @@ endfunction()
 
 configure_build_type(gaussian_host)
 configure_build_type(gaussian_kernels)
-configure_build_type(gsplat_backend) # Added for the new library
+# configure_build_type(gsplat_backend) # Removed
 if(CUDA_GL_INTEROP_FOUND AND TARGET gaussian_visualizer)
     configure_build_type(gaussian_visualizer)
 endif()
@@ -469,7 +468,7 @@ if(BUILD_TESTS)
     set(TEST_LINK_LIBRARIES
             gaussian_host
             gaussian_kernels
-            gsplat_backend
+            gsplat          # Was gsplat_backend
             GTest::gtest
             GTest::gtest_main
             Python3::Python
