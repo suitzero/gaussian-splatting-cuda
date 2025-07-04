@@ -20,7 +20,6 @@ inline int GET_BLOCKS(const int N) {
     return (N + CUDA_NUM_THREADS - 1) / CUDA_NUM_THREADS;
 }
 
-// --- CudaMath namespace: Reduced, matrix ops on raw pointers kept for transition ---
 namespace CudaMath {
 
 __device__ __forceinline__ void mat3_transpose_inplace(float* M) {
@@ -36,26 +35,6 @@ __device__ __forceinline__ void outer_product_3x3_ptr_row_major(const glm::vec3&
     out_M_ptr[0] = p[0]; out_M_ptr[1] = p[3]; out_M_ptr[2] = p[6];
     out_M_ptr[3] = p[1]; out_M_ptr[4] = p[4]; out_M_ptr[5] = p[7];
     out_M_ptr[6] = p[2]; out_M_ptr[7] = p[5]; out_M_ptr[8] = p[8];
-}
-
-__device__ __forceinline__ void mul_mat4_vec4_ptr(const float* PW_row_major_ptr, const float* p_k_h_ptr, float* result_ptr) {
-    glm::mat4 PW_col_major = glm::transpose(glm::make_mat4(PW_row_major_ptr));
-    glm::vec4 p_k_h_glm = glm::make_vec4(p_k_h_ptr[0],p_k_h_ptr[1],p_k_h_ptr[2],p_k_h_ptr[3]);
-    glm::vec4 result_glm = PW_col_major * p_k_h_glm;
-    result_ptr[0] = result_glm.x; result_ptr[1] = result_glm.y; result_ptr[2] = result_glm.z; result_ptr[3] = result_glm.w;
-}
-
-__device__ __forceinline__ void mat_mul_mat_ptr(const float* A_ptr_row_major, const float* B_ptr_row_major, float* C_ptr_row_major,
-                                             int A_rows, int A_cols_B_rows, int B_cols) {
-    for (int i = 0; i < A_rows; ++i) {
-        for (int j = 0; j < B_cols; ++j) {
-            float sum = 0.0f;
-            for (int k = 0; k < A_cols_B_rows; ++k) {
-                sum += A_ptr_row_major[i * A_cols_B_rows + k] * B_ptr_row_major[k * B_cols + j];
-            }
-            C_ptr_row_major[i * B_cols + j] = sum;
-        }
-    }
 }
 } // namespace CudaMath
 
@@ -144,26 +123,26 @@ __device__ __forceinline__ void compute_dphi_drk_up_to_degree3(
     int degree, const glm::vec3& r_k_normalized, float* dPhi_drk_out
 ) {
     float x=r_k_normalized.x; float y=r_k_normalized.y; float z=r_k_normalized.z; float x2=x*x; float y2=y*y; float z2=z*z;
-    dPhi_drk_out[0]=0.f; dPhi_drk_out[1]=0.f; dPhi_drk_out[2]=0.f; if(degree==0)return; // Coeff 0
-    dPhi_drk_out[3]=0.f; dPhi_drk_out[4]=-0.48860251190292f; dPhi_drk_out[5]=0.f; // Coeff 1
-    dPhi_drk_out[6]=0.f; dPhi_drk_out[7]=0.f; dPhi_drk_out[8]=0.48860251190292f; // Coeff 2
-    dPhi_drk_out[9]=-0.48860251190292f; dPhi_drk_out[10]=0.f; dPhi_drk_out[11]=0.f; if(degree==1)return; // Coeff 3
+    dPhi_drk_out[0]=0.f; dPhi_drk_out[1]=0.f; dPhi_drk_out[2]=0.f; if(degree==0)return;
+    dPhi_drk_out[3]=0.f; dPhi_drk_out[4]=-0.48860251190292f; dPhi_drk_out[5]=0.f;
+    dPhi_drk_out[6]=0.f; dPhi_drk_out[7]=0.f; dPhi_drk_out[8]=0.48860251190292f;
+    dPhi_drk_out[9]=-0.48860251190292f; dPhi_drk_out[10]=0.f; dPhi_drk_out[11]=0.f; if(degree==1)return;
     const float C2_0v=1.092548430592079f; const float C2_1v=-1.092548430592079f; const float C2_2vs=0.9461746957575601f;
-    dPhi_drk_out[12]=(C2_0v/2.f)*y; dPhi_drk_out[13]=(C2_0v/2.f)*x; dPhi_drk_out[14]=0.f; // Coeff 4
-    dPhi_drk_out[15]=0.f; dPhi_drk_out[16]=C2_1v*z; dPhi_drk_out[17]=C2_1v*y; // Coeff 5
-    dPhi_drk_out[18]=0.f; dPhi_drk_out[19]=0.f; dPhi_drk_out[20]=(C2_2vs/3.f)*(6.f*z); // Coeff 6
-    dPhi_drk_out[21]=C2_1v*z; dPhi_drk_out[22]=0.f; dPhi_drk_out[23]=C2_1v*x; // Coeff 7
-    dPhi_drk_out[24]=(C2_0v/2.f)*(2.f*x); dPhi_drk_out[25]=(C2_0v/2.f)*(-2.f*y); dPhi_drk_out[26]=0.f; if(degree==2)return; // Coeff 8
+    dPhi_drk_out[12]=(C2_0v/2.f)*y; dPhi_drk_out[13]=(C2_0v/2.f)*x; dPhi_drk_out[14]=0.f;
+    dPhi_drk_out[15]=0.f; dPhi_drk_out[16]=C2_1v*z; dPhi_drk_out[17]=C2_1v*y;
+    dPhi_drk_out[18]=0.f; dPhi_drk_out[19]=0.f; dPhi_drk_out[20]=(C2_2vs/3.f)*(6.f*z);
+    dPhi_drk_out[21]=C2_1v*z; dPhi_drk_out[22]=0.f; dPhi_drk_out[23]=C2_1v*x;
+    dPhi_drk_out[24]=(C2_0v/2.f)*(2.f*x); dPhi_drk_out[25]=(C2_0v/2.f)*(-2.f*y); dPhi_drk_out[26]=0.f; if(degree==2)return;
     const float K9v=-0.5900435899266435f; const float K10zcv=1.445305721320277f;
     const float K11acv=-2.285228997322329f; const float K11bcv=0.4570457994644658f;
     const float K12acv=1.865881662950577f; const float K12bcv=-1.119528997770346f; const float K15v=-0.5900435899266435f;
-    dPhi_drk_out[27]=K9v*(6.f*x*y); dPhi_drk_out[28]=K9v*(3.f*x2-3.f*y2); dPhi_drk_out[29]=0.f; // Coeff 9
-    dPhi_drk_out[30]=K10zcv*z*(2.f*y); dPhi_drk_out[31]=K10zcv*z*(2.f*x); dPhi_drk_out[32]=K10zcv*(2.f*x*y); // Coeff 10
-    dPhi_drk_out[33]=0.f; dPhi_drk_out[34]=K11acv*z2+K11bcv; dPhi_drk_out[35]=K11acv*y*(2.f*z);  // Coeff 11
-    dPhi_drk_out[36]=0.f; dPhi_drk_out[37]=0.f; dPhi_drk_out[38]=K12acv*3.f*z2+K12bcv; // Coeff 12
-    dPhi_drk_out[39]=K11acv*z2+K11bcv; dPhi_drk_out[40]=0.f; dPhi_drk_out[41]=K11acv*x*(2.f*z); // Coeff 13
-    dPhi_drk_out[42]=K10zcv*z*(2.f*x); dPhi_drk_out[43]=K10zcv*z*(-2.f*y); dPhi_drk_out[44]=K10zcv*(x2-y2); // Coeff 14
-    dPhi_drk_out[45]=K15v*(3.f*x2-3.f*y2); dPhi_drk_out[46]=K15v*(-6.f*x*y); dPhi_drk_out[47]=0.f; // Coeff 15
+    dPhi_drk_out[27]=K9v*(6.f*x*y); dPhi_drk_out[28]=K9v*(3.f*x2-3.f*y2); dPhi_drk_out[29]=0.f;
+    dPhi_drk_out[30]=K10zcv*z*(2.f*y); dPhi_drk_out[31]=K10zcv*z*(2.f*x); dPhi_drk_out[32]=K10zcv*(2.f*x*y);
+    dPhi_drk_out[33]=0.f; dPhi_drk_out[34]=K11acv*z2+K11bcv; dPhi_drk_out[35]=K11acv*y*(2.f*z);
+    dPhi_drk_out[36]=0.f; dPhi_drk_out[37]=0.f; dPhi_drk_out[38]=K12acv*3.f*z2+K12bcv;
+    dPhi_drk_out[39]=K11acv*z2+K11bcv; dPhi_drk_out[40]=0.f; dPhi_drk_out[41]=K11acv*x*(2.f*z);
+    dPhi_drk_out[42]=K10zcv*z*(2.f*x); dPhi_drk_out[43]=K10zcv*z*(-2.f*y); dPhi_drk_out[44]=K10zcv*(x2-y2);
+    dPhi_drk_out[45]=K15v*(3.f*x2-3.f*y2); dPhi_drk_out[46]=K15v*(-6.f*x*y); dPhi_drk_out[47]=0.f;
 }
 
 __device__ __forceinline__ void compute_sh_color_jacobian_single_channel(
@@ -194,11 +173,10 @@ __device__ __forceinline__ void get_projected_cov2d_and_derivs_placeholder(
     inv_cov2d_sym_row_major[0]=1.f; inv_cov2d_sym_row_major[1]=0.f; inv_cov2d_sym_row_major[2]=1.f;
     *det_cov2d=1.f;
     d_Gk_d_pik = glm::vec2(0.f,0.f);
-    // Storing into column-major glm::mat2
-    d2_Gk_d_pik2_col_major[0][0] = -1.f*inv_cov2d_sym_row_major[0]; // xx
-    d2_Gk_d_pik2_col_major[1][0] = -1.f*inv_cov2d_sym_row_major[1]; // xy (col 0, row 1)
-    d2_Gk_d_pik2_col_major[0][1] = -1.f*inv_cov2d_sym_row_major[1]; // yx (col 1, row 0)
-    d2_Gk_d_pik2_col_major[1][1] = -1.f*inv_cov2d_sym_row_major[2]; // yy
+    d2_Gk_d_pik2_col_major[0][0] = -1.f*inv_cov2d_sym_row_major[0];
+    d2_Gk_d_pik2_col_major[1][0] = -1.f*inv_cov2d_sym_row_major[1];
+    d2_Gk_d_pik2_col_major[0][1] = -1.f*inv_cov2d_sym_row_major[1];
+    d2_Gk_d_pik2_col_major[1][1] = -1.f*inv_cov2d_sym_row_major[2];
 }
 
 __global__ void compute_l1l2_loss_derivatives_kernel(
@@ -211,68 +189,109 @@ __global__ void compute_l1l2_loss_derivatives_kernel(
     else{out_dL_dc_l1l2[idx]=inv_N_pixels*((diff>1e-6f)?1.f:((diff<-1e-6f)?-1.f:0.f)); out_d2L_dc2_diag_l1l2[idx]=0.f;}
 }
 
+// __global__ void compute_position_hessian_components_kernel: This is the old, non-GLM version.
+// It will be replaced by the GLM version below.
+// The signature of the __global__ kernel itself needs to match the launcher's call.
+// The launcher (NewtonKernels::compute_position_hessian_components_kernel_launcher)
+// will now pass raw pointers for matrices and other data as defined in its .cuh declaration.
+// The GLM types are used *inside* this kernel for calculations.
+
 __global__ void compute_position_hessian_components_kernel(
-    int H_img, int W_img, int C_img, int P_total,
-    const float* means_3d_all, const float* scales_all, const float* rotations_all,
-    const float* opacities_all, const float* shs_all, int sh_degree,
-    int sh_coeffs_per_color_channel,
-    const float* view_matrix_ptr, const float* perspective_proj_matrix_ptr,
-    const float* cam_pos_world_ptr, const bool* visibility_mask_for_model,
-    const float* dL_dc_pixelwise, const float* d2L_dc2_diag_pixelwise,
-    int num_output_gaussians, float* H_p_output_packed, float* grad_p_output,
-    const int* output_index_map, bool debug_prints_enabled
+    int H_img, int W_img, int C_img,
+    int P_total,
+    const float* means_3d_all,
+    const float* scales_all,
+    const float* rotations_all,
+    const float* opacities_all,
+    const float* shs_all,
+    int sh_degree,
+    int sh_coeffs_per_color_channel, // This should match sh_coeffs_dim from .cuh
+    const float* view_matrix_ptr, // Raw pointer
+    const float* perspective_proj_matrix_ptr, // Raw pointer
+    const float* cam_pos_world_ptr,
+    const bool* visibility_mask_for_model,
+    const float* dL_dc_pixelwise,
+    const float* d2L_dc2_diag_pixelwise,
+    int num_output_gaussians,
+    float* H_p_output_packed,
+    float* grad_p_output,
+    const int* output_index_map,
+    bool debug_prints_enabled
 ) {
     int p_idx_total=blockIdx.x*blockDim.x+threadIdx.x;
     if(p_idx_total>=P_total || !visibility_mask_for_model[p_idx_total])return;
     int output_idx=output_index_map[p_idx_total]; if(output_idx<0||output_idx>=num_output_gaussians)return;
 
     glm::vec3 pk_vec3(means_3d_all[p_idx_total*3+0], means_3d_all[p_idx_total*3+1], means_3d_all[p_idx_total*3+2]);
-    const float* scales_k=scales_all+p_idx_total*3; const float* rotations_k=rotations_all+p_idx_total*4;
+    const float* scales_k=scales_all+p_idx_total*3;
+    const float* rotations_k=rotations_all+p_idx_total*4;
     float opacity_k=opacities_all[p_idx_total];
     const float* sh_coeffs_k_all_channels=shs_all+p_idx_total*sh_coeffs_per_color_channel*3;
-    glm::vec3 cam_pos_world_vec3(cam_pos_world_ptr[0],cam_pos_world_ptr[1],cam_pos_world_ptr[2]);
-    glm::vec3 view_dir_to_pk_unnormalized=pk_vec3-cam_pos_world_vec3;
-    float r_k_norm=glm::length(view_dir_to_pk_unnormalized);
-    glm::vec3 r_k_normalized=glm::normalize(view_dir_to_pk_unnormalized);
 
+    glm::vec3 cam_pos_world_vec3(cam_pos_world_ptr[0],cam_pos_world_ptr[1],cam_pos_world_ptr[2]);
+    glm::vec3 view_dir_to_pk_unnormalized = pk_vec3 - cam_pos_world_vec3;
+    float r_k_norm = glm::length(view_dir_to_pk_unnormalized);
+    glm::vec3 r_k_normalized = glm::normalize(view_dir_to_pk_unnormalized);
+
+    // Load row-major matrices from pointers and transpose to get column-major for GLM
     glm::mat4 V_col_major = glm::transpose(glm::make_mat4(view_matrix_ptr));
     glm::mat4 P_col_major = glm::transpose(glm::make_mat4(perspective_proj_matrix_ptr));
     glm::mat4 PW_col_major = P_col_major * V_col_major;
 
     glm::vec4 h_vec4_data;
     ProjectionDerivs::compute_h_vec(pk_vec3, PW_col_major, h_vec4_data);
-    float d_pi_d_pk_data_row_major[6];
-    ProjectionDerivs::compute_projection_jacobian(PW_col_major, (float)W_img, (float)H_img, h_vec4_data, d_pi_d_pk_data_row_major);
-    float d2_pi_d_pk2_x_data_row_major[9]; float d2_pi_d_pk2_y_data_row_major[9];
-    ProjectionDerivs::compute_projection_hessian(PW_col_major, (float)W_img, (float)H_img, h_vec4_data, d2_pi_d_pk2_x_data_row_major, d2_pi_d_pk2_y_data_row_major);
 
-    float sh_basis_eval_data[16]; SHDerivs::eval_sh_basis_up_to_degree3(sh_degree,r_k_normalized,sh_basis_eval_data);
+    float d_pi_d_pk_data_row_major[6]; // 2x3 row-major
+    ProjectionDerivs::compute_projection_jacobian(PW_col_major, (float)W_img, (float)H_img, h_vec4_data, d_pi_d_pk_data_row_major);
+
+    float d2_pi_d_pk2_x_data_row_major[9];
+    float d2_pi_d_pk2_y_data_row_major[9];
+    ProjectionDerivs::compute_projection_hessian(PW_col_major, (float)W_img, (float)H_img, h_vec4_data,
+                                                 d2_pi_d_pk2_x_data_row_major, d2_pi_d_pk2_y_data_row_major);
+
+    float sh_basis_eval_data[16];
+    SHDerivs::eval_sh_basis_up_to_degree3(sh_degree,r_k_normalized,sh_basis_eval_data);
+
     glm::mat3 drk_dpk_mat_col_major = SHDerivs::compute_drk_dpk_glm(r_k_normalized,r_k_norm);
-    float d_phi_d_rk_data_row_major[16*3]; SHDerivs::compute_dphi_drk_up_to_degree3(sh_degree,r_k_normalized,d_phi_d_rk_data_row_major);
+
+    float d_phi_d_rk_data_row_major[16*3];
+    SHDerivs::compute_dphi_drk_up_to_degree3(sh_degree,r_k_normalized,d_phi_d_rk_data_row_major);
 
     glm::vec3 d_c_bar_R_d_pk_val, d_c_bar_G_d_pk_val, d_c_bar_B_d_pk_val;
     float sh_coeffs_k_R[16],sh_coeffs_k_G[16],sh_coeffs_k_B[16];
-    for(int i=0;i<sh_coeffs_per_color_channel;++i){sh_coeffs_k_R[i]=sh_coeffs_k_all_channels[i*3+0]; sh_coeffs_k_G[i]=sh_coeffs_k_all_channels[i*3+1]; sh_coeffs_k_B[i]=sh_coeffs_k_all_channels[i*3+2];}
+    for(int i=0;i<sh_coeffs_per_color_channel;++i){
+        sh_coeffs_k_R[i]=sh_coeffs_k_all_channels[i*3+0];
+        sh_coeffs_k_G[i]=sh_coeffs_k_all_channels[i*3+1];
+        sh_coeffs_k_B[i]=sh_coeffs_k_all_channels[i*3+2];
+    }
     SHDerivs::compute_sh_color_jacobian_single_channel(sh_coeffs_k_R,sh_basis_eval_data,d_phi_d_rk_data_row_major,drk_dpk_mat_col_major,sh_coeffs_per_color_channel,d_c_bar_R_d_pk_val);
     SHDerivs::compute_sh_color_jacobian_single_channel(sh_coeffs_k_G,sh_basis_eval_data,d_phi_d_rk_data_row_major,drk_dpk_mat_col_major,sh_coeffs_per_color_channel,d_c_bar_G_d_pk_val);
     SHDerivs::compute_sh_color_jacobian_single_channel(sh_coeffs_k_B,sh_basis_eval_data,d_phi_d_rk_data_row_major,drk_dpk_mat_col_major,sh_coeffs_per_color_channel,d_c_bar_B_d_pk_val);
 
-    glm::vec3 g_p_k_accum_val(0.f); float H_p_k_accum_symm[6]={0.f};
+    glm::vec3 g_p_k_accum_val(0.f);
+    float H_p_k_accum_symm[6]={0.f};
+
     for(int r=0;r<H_img;++r){for(int c=0;c<W_img;++c){
         float pixel_ndc_x=(2.f*(c+0.5f)/W_img-1.f); float pixel_ndc_y=(2.f*(r+0.5f)/H_img-1.f);
-        float pi_k_ndc_x=h_vec4_data.x/(h_vec4_data.w+1e-7f); float pi_k_ndc_y=h_vec4_data.y/(h_vec4_data.w+1e-7f);
+        float pi_k_ndc_x=h_vec4_data.x/(h_vec4_data.w+1e-7f);
+        float pi_k_ndc_y=h_vec4_data.y/(h_vec4_data.w+1e-7f);
         glm::vec2 diff_ndc(pi_k_ndc_x-pixel_ndc_x, pi_k_ndc_y-pixel_ndc_y);
-        float cov2d_sym_rm[3],inv_cov2d_sym_rm[3],det_cov2d; glm::vec2 dGk_dPi; glm::mat2 d2Gk_dPi2_cm;
-        get_projected_cov2d_and_derivs_placeholder(pk_vec3,scales_k,rotations_k,view_matrix_ptr,perspective_proj_matrix_ptr,d_pi_d_pk_data_row_major,(float)W_img,(float)H_img,cov2d_sym_rm,inv_cov2d_sym_rm,&det_cov2d,dGk_dPi,d2Gk_dPi2_cm);
+
+        float cov2d_sym_rm[3],inv_cov2d_sym_rm[3],det_cov2d;
+        glm::vec2 dGk_dPi_val; glm::mat2 d2Gk_dPi2_cm_val;
+        get_projected_cov2d_and_derivs_placeholder(pk_vec3,scales_k,rotations_k,view_matrix_ptr,perspective_proj_matrix_ptr,d_pi_d_pk_data_row_major,(float)W_img,(float)H_img,cov2d_sym_rm,inv_cov2d_sym_rm,&det_cov2d,dGk_dPi_val,d2Gk_dPi2_cm_val);
+
         float G_k_pixel=expf(-0.5f*(diff_ndc.x*diff_ndc.x*inv_cov2d_sym_rm[0]+2*diff_ndc.x*diff_ndc.y*inv_cov2d_sym_rm[1]+diff_ndc.y*diff_ndc.y*inv_cov2d_sym_rm[2]));
-        if(det_cov2d<=1e-7f)G_k_pixel=0.f; if(G_k_pixel<1e-4f)continue;
+        if(det_cov2d<=1e-7f)G_k_pixel=0.f;
+        if(G_k_pixel<1e-4f)continue;
 
         glm::vec2 sigma_inv_diff(inv_cov2d_sym_rm[0]*diff_ndc.x+inv_cov2d_sym_rm[1]*diff_ndc.y, inv_cov2d_sym_rm[1]*diff_ndc.x+inv_cov2d_sym_rm[2]*diff_ndc.y);
-        dGk_dPi = -G_k_pixel * sigma_inv_diff;
-        d2Gk_dPi2_cm[0][0]=G_k_pixel*(sigma_inv_diff.x*sigma_inv_diff.x-inv_cov2d_sym_rm[0]);
-        d2Gk_dPi2_cm[1][0]=G_k_pixel*(sigma_inv_diff.x*sigma_inv_diff.y-inv_cov2d_sym_rm[1]); // For col-major mat2, this is (0,1)
-        d2Gk_dPi2_cm[0][1]=d2Gk_dPi2_cm[1][0]; // For col-major mat2, this is (1,0)
-        d2Gk_dPi2_cm[1][1]=G_k_pixel*(sigma_inv_diff.y*sigma_inv_diff.y-inv_cov2d_sym_rm[2]);
+        dGk_dPi_val = -G_k_pixel * sigma_inv_diff;
+
+        d2Gk_dPi2_cm_val[0][0]=G_k_pixel*(sigma_inv_diff.x*sigma_inv_diff.x-inv_cov2d_sym_rm[0]);
+        d2Gk_dPi2_cm_val[1][0]=G_k_pixel*(sigma_inv_diff.x*sigma_inv_diff.y-inv_cov2d_sym_rm[1]);
+        d2Gk_dPi2_cm_val[0][1]=d2Gk_dPi2_cm_val[1][0];
+        d2Gk_dPi2_cm_val[1][1]=G_k_pixel*(sigma_inv_diff.y*sigma_inv_diff.y-inv_cov2d_sym_rm[2]);
 
         float alpha_k_pixel=opacity_k*G_k_pixel;
         glm::vec3 c_bar_k_rgb_val(0.f);
@@ -280,19 +299,24 @@ __global__ void compute_position_hessian_components_kernel(
         for(int i=0;i<sh_coeffs_per_color_channel;++i)c_bar_k_rgb_val.y+=sh_coeffs_k_G[i]*sh_basis_eval_data[i];
         for(int i=0;i<sh_coeffs_per_color_channel;++i)c_bar_k_rgb_val.z+=sh_coeffs_k_B[i]*sh_basis_eval_data[i];
         glm::vec3 d_c_final_d_Gk_val=c_bar_k_rgb_val*opacity_k;
+
         glm::vec3 d_Gk_d_pk_chain_val;
-        d_Gk_d_pk_chain_val.x=dGk_dPi.x*d_pi_d_pk_data_row_major[0]+dGk_dPi.y*d_pi_d_pk_data_row_major[3];
-        d_Gk_d_pk_chain_val.y=dGk_dPi.x*d_pi_d_pk_data_row_major[1]+dGk_dPi.y*d_pi_d_pk_data_row_major[4];
-        d_Gk_d_pk_chain_val.z=dGk_dPi.x*d_pi_d_pk_data_row_major[2]+dGk_dPi.y*d_pi_d_pk_data_row_major[5];
+        d_Gk_d_pk_chain_val.x=dGk_dPi_val.x*d_pi_d_pk_data_row_major[0]+dGk_dPi_val.y*d_pi_d_pk_data_row_major[3];
+        d_Gk_d_pk_chain_val.y=dGk_dPi_val.x*d_pi_d_pk_data_row_major[1]+dGk_dPi_val.y*d_pi_d_pk_data_row_major[4];
+        d_Gk_d_pk_chain_val.z=dGk_dPi_val.x*d_pi_d_pk_data_row_major[2]+dGk_dPi_val.y*d_pi_d_pk_data_row_major[5];
+
         glm::vec3 J_c_pk_R=d_c_bar_R_d_pk_val*alpha_k_pixel+d_Gk_d_pk_chain_val*d_c_final_d_Gk_val.x;
         glm::vec3 J_c_pk_G=d_c_bar_G_d_pk_val*alpha_k_pixel+d_Gk_d_pk_chain_val*d_c_final_d_Gk_val.y;
         glm::vec3 J_c_pk_B=d_c_bar_B_d_pk_val*alpha_k_pixel+d_Gk_d_pk_chain_val*d_c_final_d_Gk_val.z;
+
         int pixel_idx_flat=(r*W_img+c)*C_img;
         glm::vec3 dL_dc_val(dL_dc_pixelwise[pixel_idx_flat+0],dL_dc_pixelwise[pixel_idx_flat+1],dL_dc_pixelwise[pixel_idx_flat+2]);
         glm::vec3 d2L_dc2_diag_val(d2L_dc2_diag_pixelwise[pixel_idx_flat+0],d2L_dc2_diag_pixelwise[pixel_idx_flat+1],d2L_dc2_diag_pixelwise[pixel_idx_flat+2]);
+
         g_p_k_accum_val.x+=J_c_pk_R.x*dL_dc_val.x+J_c_pk_G.x*dL_dc_val.y+J_c_pk_B.x*dL_dc_val.z;
         g_p_k_accum_val.y+=J_c_pk_R.y*dL_dc_val.x+J_c_pk_G.y*dL_dc_val.y+J_c_pk_B.y*dL_dc_val.z;
         g_p_k_accum_val.z+=J_c_pk_R.z*dL_dc_val.x+J_c_pk_G.z*dL_dc_val.y+J_c_pk_B.z*dL_dc_val.z;
+
         H_p_k_accum_symm[0]+=J_c_pk_R.x*d2L_dc2_diag_val.x*J_c_pk_R.x+J_c_pk_G.x*d2L_dc2_diag_val.y*J_c_pk_G.x+J_c_pk_B.x*d2L_dc2_diag_val.z*J_c_pk_B.x;
         H_p_k_accum_symm[1]+=J_c_pk_R.x*d2L_dc2_diag_val.x*J_c_pk_R.y+J_c_pk_G.x*d2L_dc2_diag_val.y*J_c_pk_G.y+J_c_pk_B.x*d2L_dc2_diag_val.z*J_c_pk_B.y;
         H_p_k_accum_symm[2]+=J_c_pk_R.x*d2L_dc2_diag_val.x*J_c_pk_R.z+J_c_pk_G.x*d2L_dc2_diag_val.y*J_c_pk_G.z+J_c_pk_B.x*d2L_dc2_diag_val.z*J_c_pk_B.z;
@@ -305,14 +329,9 @@ __global__ void compute_position_hessian_components_kernel(
 }
 
 __global__ void project_position_hessian_gradient_kernel(
-    int num_visible_gaussians,
-    const float* H_p_packed_input,
-    const float* grad_p_input,
-    const float* means_3d_visible,
-    const float* view_matrix,
-    const float* cam_pos_world,
-    float* out_H_v_packed,
-    float* out_grad_v) {
+    int num_visible_gaussians, const float* H_p_packed_input, const float* grad_p_input,
+    const float* means_3d_visible, const float* view_matrix, const float* cam_pos_world,
+    float* out_H_v_packed, float* out_grad_v) {
     int idx=blockIdx.x*blockDim.x+threadIdx.x; if(idx>=num_visible_gaussians)return;
     float ux[3]={view_matrix[0],view_matrix[4],view_matrix[8]}; float uy[3]={view_matrix[1],view_matrix[5],view_matrix[9]};
     out_grad_v[idx*2+0]=ux[0]*grad_p_input[idx*3+0]+ux[1]*grad_p_input[idx*3+1]+ux[2]*grad_p_input[idx*3+2];
@@ -436,21 +455,21 @@ void compute_loss_derivatives_kernel_launcher(
 }
 
 void NewtonKernels::compute_position_hessian_components_kernel_launcher(
-    int H_img, int W_img, int C_img,
+    int H, int W, int C_img, // Matched with .cuh
     int P_total,
     const float* means_3d_all, const float* scales_all, const float* rotations_all,
     const float* opacities_all, const float* shs_all,
     int sh_degree,
-    int sh_coeffs_per_color_channel,
-    const float* view_matrix_ptr,
-    const float* perspective_proj_matrix_ptr,
-    const float* cam_pos_world_ptr,
+    int sh_coeffs_dim, // Matched with .cuh
+    const float* view_matrix, // Matched with .cuh
+    const float* projection_matrix_for_jacobian, // Matched with .cuh
+    const float* cam_pos_world, // Matched with .cuh
     const torch::Tensor& visibility_mask_for_model_tensor,
-    const float* dL_dc_pixelwise_ptr,
-    const float* d2L_dc2_diag_pixelwise_ptr,
+    const float* dL_dc_pixelwise, // Matched with .cuh
+    const float* d2L_dc2_diag_pixelwise, // Matched with .cuh
     int num_output_gaussians,
-    float* H_p_output_packed_ptr,
-    float* grad_p_output_ptr,
+    float* H_p_output_packed, // Matched with .cuh
+    float* grad_p_output,   // Matched with .cuh
     bool debug_prints_enabled
 ) {
     TORCH_CHECK(visibility_mask_for_model_tensor.defined(), "visibility_mask_for_model_tensor is not defined in launcher.");
@@ -477,11 +496,11 @@ void NewtonKernels::compute_position_hessian_components_kernel_launcher(
 
     if (debug_prints_enabled && P_total > 0) {
          printf("[CUDA LAUNCHER] compute_position_hessian_components_kernel. P_total: %d, num_output_gaussians: %d, H/W/C: %d/%d/%d\n",
-                P_total, num_output_gaussians, H_img, W_img, C_img);
+                P_total, num_output_gaussians, H, W, C_img); // Use H, W, C_img
     }
 
     compute_position_hessian_components_kernel<<<GET_BLOCKS(P_total), CUDA_NUM_THREADS>>>(
-        H_img, W_img, C_img,
+        H, W, C_img, // Use H, W, C_img
         P_total,
         means_3d_all,
         scales_all,
@@ -489,16 +508,17 @@ void NewtonKernels::compute_position_hessian_components_kernel_launcher(
         opacities_all,
         shs_all,
         sh_degree,
-        sh_coeffs_per_color_channel,
-        view_matrix_ptr,
-        perspective_proj_matrix_ptr,
-        cam_pos_world_ptr,
+        sh_coeffs_dim, // Use sh_coeffs_dim (which is (sh_degree+1)^2)
+        view_matrix,   // Use view_matrix
+        projection_matrix_for_jacobian, // Use projection_matrix_for_jacobian
+        cam_pos_world, // Use cam_pos_world
+        // Parameters means_2d_render, depths_render, radii_render, P_render are removed from __global__ kernel call
         visibility_mask_gpu_ptr,
-        dL_dc_pixelwise_ptr,
-        d2L_dc2_diag_pixelwise_ptr,
+        dL_dc_pixelwise, // Use dL_dc_pixelwise
+        d2L_dc2_diag_pixelwise, // Use d2L_dc2_diag_pixelwise
         num_output_gaussians,
-        H_p_output_packed_ptr,
-        grad_p_output_ptr,
+        H_p_output_packed, // Use H_p_output_packed
+        grad_p_output,   // Use grad_p_output
         output_index_map_gpu,
         debug_prints_enabled
     );
@@ -715,3 +735,257 @@ void NewtonKernels::compute_sh_hessian_gradient_components_kernel_launcher(
 } // namespace NewtonKernels
 
 [end of gsplat/newton_kernels.cu]
+
+[start of gsplat/newton_kernels.cuh]
+// kernels/newton_kernels.cuh
+#pragma once
+#include <torch/torch.h>
+#include "core/torch_utils.hpp" // For gs::torch_utils like get_data_ptr
+#include "core/rasterizer.hpp" // For gs::RenderOutput
+
+namespace NewtonKernels {
+
+// Launcher for computing dL/dc and d2L/dc2
+void compute_loss_derivatives_kernel_launcher(
+    const torch::Tensor& rendered_image_tensor, // [H, W, C]
+    const torch::Tensor& gt_image_tensor,       // [H, W, C]
+    float lambda_dssim,
+    bool use_l2_loss_term, // If true, L2+SSIM for L, else L1+SSIM
+    torch::Tensor& out_dL_dc_tensor,      // [H, W, C]
+    torch::Tensor& out_d2L_dc2_diag_tensor // [H, W, C] (diagonal elements)
+);
+
+// Launcher for computing Hessian components for position
+// H_p = J_c^T * H_L_c * J_c + G_L_c * H_c_y
+// g_p = J_c^T * G_L_c
+// J_c = 𝜕𝒄 / 𝜕𝒑𝑘 (Jacobian of final pixel color w.r.t. p_k)
+// H_L_c = 𝜕²L/𝜕c² (Hessian of loss w.r.t. final pixel color)
+// G_L_c = 𝜕L/𝜕c (Gradient of loss w.r.t. final pixel color)
+// H_c_y = 𝜕²𝒄/𝜕p² (Hessian of final pixel color w.r.t. p_k)
+void compute_position_hessian_components_kernel_launcher(
+    // Image dimensions
+    int H, int W, int C_img, // C_img is number of channels in image (e.g. 3 for RGB)
+    // Gaussian properties (all Gaussians in the model)
+    int P_total,
+    const float* means_3d_all,
+    const float* scales_all,
+    const float* rotations_all,
+    const float* opacities_all,
+    const float* shs_all,
+    int sh_degree,
+    int sh_coeffs_dim, // total dimension of SH coeffs per channel (e.g., (sh_degree+1)^2)
+    // Camera properties
+    const float* view_matrix,
+    const float* projection_matrix_for_jacobian, // Typically K matrix [3,3] or [4,4]
+    const float* cam_pos_world,
+    // Data from RenderOutput (for Gaussians processed by rasterizer, potentially culled)
+    // const float* means_2d_render,  // [P_render, 2] // Removed, kernel does full iteration
+    // const float* depths_render,   // [P_render] // Removed
+    // const float* radii_render,    // [P_render] // Removed
+    // int P_render, // Removed
+    // Visibility mask for *all* Gaussians in the model [P_total]. True if Gaussian k is visible on screen.
+    const torch::Tensor& visibility_mask_for_model_tensor,
+    // Loss derivatives (pixel-wise)
+    const float* dL_dc_pixelwise,          // [H, W, C_img]
+    const float* d2L_dc2_diag_pixelwise,   // [H, W, C_img]
+    // Output arrays are for Gaussians where visibility_mask_for_model is true.
+    // num_output_gaussians is the count of true in visibility_mask_for_model.
+    int num_output_gaussians,
+    // Output arrays (dense, for visible Gaussians from model)
+    float* H_p_output_packed, // [num_output_gaussians, 6] (symmetric 3x3)
+    float* grad_p_output,     // [num_output_gaussians, 3]
+    bool debug_prints_enabled // For conditional printing inside launcher
+);
+
+
+// Launcher for projecting Hessian and Gradient to camera plane
+void project_position_hessian_gradient_kernel_launcher(
+    int num_visible_gaussians,
+    const float* H_p_packed_input,
+    const float* grad_p_input,
+    const float* means_3d_visible,
+    const float* view_matrix,
+    const float* cam_pos_world,
+    float* out_H_v_packed,
+    float* out_grad_v
+);
+
+// Launcher for solving batch 2x2 linear systems H_v * delta_v = -g_v
+void batch_solve_2x2_system_kernel_launcher(
+    int num_systems,
+    const float* H_v_packed,
+    const float* g_v,
+    float damping,
+    float step_scale, // Applied as: delta_v = -step_scale * H_inv * g
+    float* out_delta_v
+);
+
+// Launcher for re-projecting delta_v to 3D delta_p = U_k * delta_v
+void project_update_to_3d_kernel_launcher(
+    int num_updates,
+    const float* delta_v,
+    const float* means_3d_visible,
+    const float* view_matrix,
+    const float* cam_pos_world,
+    float* out_delta_p
+);
+
+// --- Launchers for Scale Optimization (Placeholders) ---
+
+// Computes Hessian and gradient components for scale parameters
+void compute_scale_hessian_gradient_components_kernel_launcher(
+    // Image dimensions
+    int H_img, int W_img, int C_img,
+    // Model data (need access to means, scales, rotations, opacities, SHs for full ∂c/∂s_k)
+    // For simplicity, let's assume these are passed via some context or specific tensors
+    int P_total, // Total number of Gaussians in model
+    const torch::Tensor& means_all,     // [P_total, 3]
+    const torch::Tensor& scales_all,    // [P_total, 3]
+    const torch::Tensor& rotations_all, // [P_total, 4]
+    const torch::Tensor& opacities_all, // [P_total]
+    const torch::Tensor& shs_all,       // [P_total, K, 3]
+    int sh_degree,
+    // Camera
+    const torch::Tensor& view_matrix,   // [4,4] or [1,4,4]
+    const torch::Tensor& K_matrix,      // [3,3] or [1,3,3]
+    const torch::Tensor& cam_pos_world, // [3]
+    // Render output from primary view (e.g., for tile information if applicable)
+    const gs::RenderOutput& render_output, // May not be fully needed if we re-evaluate coverage
+    // Visibility
+    const torch::Tensor& visible_indices, // Indices of visible Gaussians [N_vis]
+    // Loss derivatives (pixel-wise from primary view)
+    const torch::Tensor& dL_dc_pixelwise,        // [H_img, W_img, C_img]
+    const torch::Tensor& d2L_dc2_diag_pixelwise, // [H_img, W_img, C_img]
+    // Output arrays (for visible Gaussians)
+    torch::Tensor& out_H_s_packed, // [N_vis, 6] (for 3x3 symmetric Hessian of scales)
+    torch::Tensor& out_g_s         // [N_vis, 3] (gradient w.r.t. scales)
+    // bool debug_prints_enabled (already added to position launcher, could add here too)
+);
+
+// Solves batch 3x3 linear systems H_s * delta_s = -g_s
+// (Note: paper might project scales to 2D eigenvalues, then it'd be a 2x2 solve)
+void batch_solve_3x3_system_kernel_launcher(
+    int num_systems,
+    const torch::Tensor& H_s_packed, // [N_vis, 6]
+    const torch::Tensor& g_s,        // [N_vis, 3]
+    float damping,
+    // float step_scale is not here, applied in C++ after solve
+    torch::Tensor& out_delta_s       // [N_vis, 3]
+);
+
+// --- Launchers for Rotation Optimization (Placeholders) ---
+
+// Computes Hessian and gradient components for rotation angle theta_k
+void compute_rotation_hessian_gradient_components_kernel_launcher(
+    // Image dimensions
+    int H_img, int W_img, int C_img,
+    // Model data
+    int P_total,
+    const torch::Tensor& means_all,
+    const torch::Tensor& scales_all,
+    const torch::Tensor& rotations_all,
+    const torch::Tensor& opacities_all,
+    const torch::Tensor& shs_all,
+    int sh_degree,
+    // Camera & View related
+    const torch::Tensor& view_matrix,   // World to Camera
+    const torch::Tensor& K_matrix,
+    const torch::Tensor& cam_pos_world,
+    const torch::Tensor& r_k_vecs,      // [N_vis, 3] view vectors (rotation axes)
+    // Render output (if needed for tile iterators, etc.)
+    const gs::RenderOutput& render_output,
+    // Visibility
+    const torch::Tensor& visible_indices, // [N_vis]
+    // Loss derivatives
+    const torch::Tensor& dL_dc_pixelwise,
+    const torch::Tensor& d2L_dc2_diag_pixelwise,
+    // Output arrays (for visible Gaussians)
+    torch::Tensor& out_H_theta, // [N_vis, 1] (scalar Hessian for angle theta_k)
+    torch::Tensor& out_g_theta  // [N_vis, 1] (scalar gradient for angle theta_k)
+);
+
+// Solves batch 1x1 linear systems H_theta * delta_theta = -g_theta
+void batch_solve_1x1_system_kernel_launcher(
+    int num_systems,
+    const torch::Tensor& H_theta, // [N_vis, 1] or [N_vis]
+    const torch::Tensor& g_theta, // [N_vis, 1] or [N_vis]
+    float damping,
+    torch::Tensor& out_delta_theta // [N_vis, 1] or [N_vis]
+);
+
+// --- Launchers for Opacity Optimization (Placeholders) ---
+
+// Computes Hessian and gradient components for opacity parameter sigma_k
+// This would compute the parts of H_σ and g_σ derived from color rendering,
+// before barrier terms are added in C++.
+// Note: Paper states ∂²c/∂σ_k² = 0, which simplifies H_σ_base.
+void compute_opacity_hessian_gradient_components_kernel_launcher(
+    // Image dimensions
+    int H_img, int W_img, int C_img,
+    // Model data (means, scales, rotations, opacities, shs, etc. needed for ∂c/∂σ_k)
+    int P_total,
+    const torch::Tensor& means_all,
+    const torch::Tensor& scales_all,
+    const torch::Tensor& rotations_all,
+    const torch::Tensor& opacities_all, // Current opacities (sigmoided)
+    const torch::Tensor& shs_all,
+    int sh_degree,
+    // Camera
+    const torch::Tensor& view_matrix,
+    const torch::Tensor& K_matrix,
+    const torch::Tensor& cam_pos_world,
+    // Render output (e.g., for tile iterators, accumulated alpha up to k-1 for each Gaussian)
+    const gs::RenderOutput& render_output, // And potentially sorted Gaussian indices if used by kernel
+    // Visibility
+    const torch::Tensor& visible_indices, // [N_vis]
+    // Loss derivatives
+    const torch::Tensor& dL_dc_pixelwise,
+    const torch::Tensor& d2L_dc2_diag_pixelwise,
+    // Output arrays (for visible Gaussians)
+    torch::Tensor& out_H_sigma_base, // [N_vis] (scalar base Hessian for opacity)
+    torch::Tensor& out_g_sigma_base  // [N_vis] (scalar base gradient for opacity)
+);
+
+// --- Launchers for SH (Color) Optimization (Placeholders) ---
+
+// Evaluates SH basis functions for given view directions
+// Output: sh_bases_values [N_vis, num_sh_coeffs]
+torch::Tensor compute_sh_bases_kernel_launcher(
+    int sh_degree,
+    const torch::Tensor& normalized_view_vectors // [N_vis, 3] (r_k_normalized)
+);
+
+// Computes Hessian and gradient components for SH coefficients c_k
+// Note: Paper states ∂²c_R/∂c_{k,R}² = 0 for direct color contribution, simplifying H_ck.
+// H_ck might be diagonal or block-diagonal per channel. This launcher outputs diagonal for simplicity.
+void compute_sh_hessian_gradient_components_kernel_launcher(
+    // Image dimensions
+    int H_img, int W_img, int C_img,
+    // Model data
+    int P_total,
+    const torch::Tensor& means_all,
+    const torch::Tensor& scales_all,
+    const torch::Tensor& rotations_all,
+    const torch::Tensor& opacities_all,
+    const torch::Tensor& shs_all, // Current SH coeffs [P_total, (deg+1)^2, 3]
+    int sh_degree,
+    const torch::Tensor& sh_bases_values, // Precomputed from compute_sh_bases_kernel_launcher [N_vis, (deg+1)^2]
+    // Camera
+    const torch::Tensor& view_matrix,
+    const torch::Tensor& proj_param_for_sh_hess, // Renamed from K_matrix
+    // Render output (for tile iterators, accumulated alpha etc.)
+    const gs::RenderOutput& render_output,
+    // Visibility
+    const torch::Tensor& visible_indices, // [N_vis]
+    // Loss derivatives
+    const torch::Tensor& dL_dc_pixelwise,
+    const torch::Tensor& d2L_dc2_diag_pixelwise,
+    // Output arrays (for visible Gaussians)
+    torch::Tensor& out_H_ck_diag, // [N_vis, num_sh_coeffs_flat] (diagonal of Hessian for SH coeffs)
+    torch::Tensor& out_g_ck       // [N_vis, num_sh_coeffs_flat] (gradient for SH coeffs)
+);
+
+
+} // namespace NewtonKernels
+
+[end of gsplat/newton_kernels.cuh]

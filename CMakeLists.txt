@@ -287,9 +287,9 @@ target_include_directories(${PROJECT_NAME}
 
 # Link directly to all libraries
 set(MAIN_LINK_LIBRARIES
+        gsplat_backend  # Moved before gaussian_host
         gaussian_host
         gaussian_kernels
-        gsplat_backend  # Corrected to gsplat_backend
         Python3::Python
         ${OPENGL_LIBRARIES}
         CUDA::cudart
@@ -466,9 +466,9 @@ if(BUILD_TESTS)
     )
 
     set(TEST_LINK_LIBRARIES
+            gsplat_backend  # Moved before gaussian_host
             gaussian_host
             gaussian_kernels
-            gsplat_backend  # Corrected to gsplat_backend
             GTest::gtest
             GTest::gtest_main
             Python3::Python
