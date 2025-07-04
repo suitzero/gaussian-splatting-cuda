@@ -916,22 +916,25 @@ void NewtonKernels::compute_sh_hessian_gradient_components_kernel_launcher(
     int H_img, int W_img, int C_img,
     int P_total,
     const torch::Tensor& means_all,
-    const torch::Tensor& scales_all,
-    const torch::Tensor& rotations_all,
-    const torch::Tensor& opacities_all,
-    const torch::Tensor& shs_all,
+    const torch::Tensor& scales_all_raw, // Matching .cuh
+    const torch::Tensor& rotations_all_raw, // Matching .cuh
+    const torch::Tensor& opacities_all_raw, // Matching .cuh
+    const torch::Tensor& shs_all_raw, // Matching .cuh
     int sh_degree,
     const torch::Tensor& sh_bases_values,
     const torch::Tensor& view_matrix,
-    const torch::Tensor& proj_param_for_sh_hess,
+    const torch::Tensor& K_matrix, // Matching .cuh (was proj_param_for_sh_hess)
     const gs::RenderOutput& render_output,
     const torch::Tensor& visible_indices,
-    const torch::Tensor& dL_dc_pixelwise,
-    const torch::Tensor& d2L_dc2_diag_pixelwise,
-    torch::Tensor& out_H_ck_diag,
-    torch::Tensor& out_g_ck
+    const torch::Tensor& dL_dc_pixelwise, // Matching .cuh
+    const torch::Tensor& d2L_dc2_diag_pixelwise_for_hessian, // Matching .cuh
+    torch::Tensor& out_H_sh_diag, // Matching .cuh (was out_H_ck_diag)
+    torch::Tensor& out_g_sh       // Matching .cuh (was out_g_ck)
 ) {
     // Stub - body intentionally empty for debugging
+    // Ensure outputs are zeroed or filled if not done by caller and kernel is empty
+    if (out_H_sh_diag.numel() > 0) out_H_sh_diag.zero_();
+    if (out_g_sh.numel() > 0) out_g_sh.zero_();
 }
 } // namespace NewtonKernels
 

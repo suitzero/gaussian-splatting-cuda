@@ -34,7 +34,6 @@ void compute_position_hessian_components_kernel_launcher(
     const float* projection_matrix_for_jacobian, // Matched with .cuh
     const float* cam_pos_world,                  // Matched with .cuh
     const torch::Tensor& visibility_mask_for_model_tensor,
-    const torch::Tensor& visibility_mask_for_model_tensor,
     // dL_dc_pixelwise is removed as autograd gradients will be used directly for 'g'.
     const float* d2L_dc2_diag_pixelwise_for_hessian, // Still needed for H calculation.
     int num_output_gaussians,
@@ -194,9 +193,9 @@ torch::Tensor compute_sh_bases_kernel_launcher(
     const torch::Tensor& normalized_view_vectors // [N_vis, 3] (r_k_normalized)
 );
 
-// Computes Hessian components for SH coefficients. Gradient comes from autograd.
+// Computes Hessian and Gradient components for SH coefficients.
 // Assumes Hessian is diagonal per SH coefficient (simplification from paper: ∂²c_R/∂c_{k,R}² = 0).
-void compute_sh_hessian_components_kernel_launcher(
+void compute_sh_hessian_gradient_components_kernel_launcher(
     // Image dimensions
     int H_img, int W_img, int C_img,
     // Model data
@@ -215,10 +214,12 @@ void compute_sh_hessian_components_kernel_launcher(
     const gs::RenderOutput& render_output,
     // Visibility
     const torch::Tensor& visible_indices, // [N_vis]
-    // Second derivative of loss w.r.t. pixel color (for Hessian)
+    // Loss derivatives
+    const torch::Tensor& dL_dc_pixelwise, // Gradient of loss w.r.t. pixel color
     const torch::Tensor& d2L_dc2_diag_pixelwise_for_hessian, // [H_img, W_img, C_img]
-    // Output array for visible Gaussians
-    torch::Tensor& out_H_sh_diag // [N_vis, num_sh_coeffs_flat] (diagonal of Hessian for SH coeffs)
+    // Output arrays for visible Gaussians
+    torch::Tensor& out_H_sh_diag, // [N_vis, num_sh_coeffs_flat] (diagonal of Hessian for SH coeffs)
+    torch::Tensor& out_g_sh // [N_vis, num_sh_coeffs_flat] (gradient for SH coeffs)
 );
 
 

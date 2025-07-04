@@ -457,13 +457,10 @@ void NewtonOptimizer::step(int iteration,
         return; // Early exit if no Gaussians are visible
     }
 
-    // Only proceed with means optimization if enabled
-    if (options_.optimize_means) {
-        torch::Tensor means_visible_from_model = model_.means().detach().index_select(0, visible_indices);
-        torch::Tensor grad_means_visible_autograd = autograd_grad_means_total.index_select(0, visible_indices);
-
-        // I. Compute d2L/dc2 for primary target (dL/dc comes from autograd_grad_means)
-        torch::Tensor rendered_image_squeezed = current_render_output.image.squeeze(0);
+    // I. Compute d2L/dc2 for primary target. This is needed for all attribute Hessians.
+    // dL/dc for the primary target (used for SH gradient) will also come from this.
+    // Autograd gradients are used for means, scales, rotations, opacities.
+    torch::Tensor rendered_image_squeezed = current_render_output.image.squeeze(0);
     torch::Tensor gt_image_prepared = primary_gt_image;
 
     // Ensure rendered_image is HWC
@@ -484,7 +481,12 @@ void NewtonOptimizer::step(int iteration,
         gt_image_prepared,
         options_.lambda_dssim_for_hessian,
         options_.use_l2_for_hessian_L_term
-    ); // This computes both dL_dc and d2L_dc2_diag. We only need d2L_dc2_diag for H.
+    );
+
+    // Only proceed with means optimization if enabled
+    if (options_.optimize_means) {
+        torch::Tensor means_visible_from_model = model_.means().detach().index_select(0, visible_indices);
+        torch::Tensor grad_means_visible_autograd = autograd_grad_means_total.index_select(0, visible_indices);
 
     // II. Compute Hessian components (H_p) for primary target. Gradient g_p comes from autograd.
         if (options_.debug_print_shapes) {
