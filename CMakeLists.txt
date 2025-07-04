@@ -115,7 +115,7 @@ target_link_libraries(gaussian_host
         Threads::Threads
         args
         Python3::Python
-        gsplat          # Link to gsplat (was gsplat_backend)
+        gsplat_backend  # Link to gsplat_backend (correct target name)
         ${OPENGL_LIBRARIES}
         CUDA::cudart    # Add CUDA runtime for interop
 )
@@ -289,7 +289,7 @@ target_include_directories(${PROJECT_NAME}
 set(MAIN_LINK_LIBRARIES
         gaussian_host
         gaussian_kernels
-        gsplat          # Was gsplat_backend
+        gsplat_backend  # Corrected to gsplat_backend
         Python3::Python
         ${OPENGL_LIBRARIES}
         CUDA::cudart
@@ -406,7 +406,7 @@ endfunction()
 
 configure_build_type(gaussian_host)
 configure_build_type(gaussian_kernels)
-# configure_build_type(gsplat_backend) # Removed
+configure_build_type(gsplat_backend) # Corrected back to gsplat_backend
 if(CUDA_GL_INTEROP_FOUND AND TARGET gaussian_visualizer)
     configure_build_type(gaussian_visualizer)
 endif()
@@ -468,7 +468,7 @@ if(BUILD_TESTS)
     set(TEST_LINK_LIBRARIES
             gaussian_host
             gaussian_kernels
-            gsplat          # Was gsplat_backend
+            gsplat_backend  # Corrected to gsplat_backend
             GTest::gtest
             GTest::gtest_main
             Python3::Python

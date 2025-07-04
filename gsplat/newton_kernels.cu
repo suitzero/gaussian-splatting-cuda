@@ -20,7 +20,8 @@ inline int GET_BLOCKS(const int N) {
     return (N + CUDA_NUM_THREADS - 1) / CUDA_NUM_THREADS;
 }
 
-namespace CudaMath { // Kept for raw pointer matrix ops if needed during transition
+// --- CudaMath namespace: Reduced, matrix ops on raw pointers kept for transition ---
+namespace CudaMath {
 
 __device__ __forceinline__ void mat3_transpose_inplace(float* M) {
     float temp;
@@ -30,29 +31,26 @@ __device__ __forceinline__ void mat3_transpose_inplace(float* M) {
 }
 
 __device__ __forceinline__ void outer_product_3x3_ptr_row_major(const glm::vec3& a, const glm::vec3& b, float* out_M_ptr) {
-    glm::mat3 result_mat_col_major = glm::outerProduct(a,b); // GLM's outerProduct gives col-major
-    // Store as row-major
-    out_M_ptr[0] = result_mat_col_major[0][0]; out_M_ptr[1] = result_mat_col_major[1][0]; out_M_ptr[2] = result_mat_col_major[2][0];
-    out_M_ptr[3] = result_mat_col_major[0][1]; out_M_ptr[4] = result_mat_col_major[1][1]; out_M_ptr[5] = result_mat_col_major[2][1];
-    out_M_ptr[6] = result_mat_col_major[0][2]; out_M_ptr[7] = result_mat_col_major[1][2]; out_M_ptr[8] = result_mat_col_major[2][2];
+    glm::mat3 result_mat_col_major = glm::outerProduct(a,b);
+    const float* p = glm::value_ptr(result_mat_col_major);
+    out_M_ptr[0] = p[0]; out_M_ptr[1] = p[3]; out_M_ptr[2] = p[6];
+    out_M_ptr[3] = p[1]; out_M_ptr[4] = p[4]; out_M_ptr[5] = p[7];
+    out_M_ptr[6] = p[2]; out_M_ptr[7] = p[5]; out_M_ptr[8] = p[8];
 }
 
 __device__ __forceinline__ void mul_mat4_vec4_ptr(const float* PW_row_major_ptr, const float* p_k_h_ptr, float* result_ptr) {
     glm::mat4 PW_col_major = glm::transpose(glm::make_mat4(PW_row_major_ptr));
-    glm::vec4 p_k_h_glm = glm::make_vec4(p_k_h_ptr);
+    glm::vec4 p_k_h_glm = glm::make_vec4(p_k_h_ptr[0],p_k_h_ptr[1],p_k_h_ptr[2],p_k_h_ptr[3]);
     glm::vec4 result_glm = PW_col_major * p_k_h_glm;
     result_ptr[0] = result_glm.x; result_ptr[1] = result_glm.y; result_ptr[2] = result_glm.z; result_ptr[3] = result_glm.w;
 }
 
 __device__ __forceinline__ void mat_mul_mat_ptr(const float* A_ptr_row_major, const float* B_ptr_row_major, float* C_ptr_row_major,
                                              int A_rows, int A_cols_B_rows, int B_cols) {
-    // This function is generic. If A_rows, A_cols_B_rows, B_cols are all 4, it's mat4 mult.
-    // For mat_mul_mat(dPhi_drk, drk_dpk, M_prod, num_basis_coeffs, 3, 3);
-    // dPhi_drk is (num_basis_coeffs x 3) row-major. drk_dpk is (3x3) row-major. M_prod is (num_basis_coeffs x 3) row-major.
-    for (int i = 0; i < A_rows; ++i) { // For each row of A (and C)
-        for (int j = 0; j < B_cols; ++j) { // For each col of B (and C)
+    for (int i = 0; i < A_rows; ++i) {
+        for (int j = 0; j < B_cols; ++j) {
             float sum = 0.0f;
-            for (int k = 0; k < A_cols_B_rows; ++k) { // Inner dimension
+            for (int k = 0; k < A_cols_B_rows; ++k) {
                 sum += A_ptr_row_major[i * A_cols_B_rows + k] * B_ptr_row_major[k * B_cols + j];
             }
             C_ptr_row_major[i * B_cols + j] = sum;
@@ -106,14 +104,12 @@ __device__ __forceinline__ void compute_projection_hessian(
     float factor_x1 = W_I_t * (2.0f * hx / hw_cubed);
     float factor_x2 = W_I_t * (-1.0f * inv_hw_sq);
     glm::mat3 H_pi_x_col_major = factor_x1 * PW3_outer_PW3 + factor_x2 * (PW3_outer_PW0 + PW0_outer_PW3);
-    const float* p_x = glm::value_ptr(H_pi_x_col_major);
-    for(int i=0; i<3; ++i) for(int j=0; j<3; ++j) hessian_out_pi_x_3x3_row_major[i*3+j] = H_pi_x_col_major[j][i]; // Store transpose
+    for(int i=0; i<3; ++i) for(int j=0; j<3; ++j) hessian_out_pi_x_3x3_row_major[i*3+j] = H_pi_x_col_major[j][i];
 
     float factor_y1 = H_I_t * (2.0f * hy / hw_cubed);
     float factor_y2 = H_I_t * (-1.0f * inv_hw_sq);
     glm::mat3 H_pi_y_col_major = factor_y1 * PW3_outer_PW3 + factor_y2 * (PW3_outer_PW1 + PW1_outer_PW3);
-    const float* p_y = glm::value_ptr(H_pi_y_col_major);
-    for(int i=0; i<3; ++i) for(int j=0; j<3; ++j) hessian_out_pi_y_3x3_row_major[i*3+j] = H_pi_y_col_major[j][i]; // Store transpose
+    for(int i=0; i<3; ++i) for(int j=0; j<3; ++j) hessian_out_pi_y_3x3_row_major[i*3+j] = H_pi_y_col_major[j][i];
 }
 } // namespace ProjectionDerivs
 
@@ -148,37 +144,37 @@ __device__ __forceinline__ void compute_dphi_drk_up_to_degree3(
     int degree, const glm::vec3& r_k_normalized, float* dPhi_drk_out
 ) {
     float x=r_k_normalized.x; float y=r_k_normalized.y; float z=r_k_normalized.z; float x2=x*x; float y2=y*y; float z2=z*z;
-    dPhi_drk_out[0]=0.f; dPhi_drk_out[1]=0.f; dPhi_drk_out[2]=0.f; if(degree==0)return;
-    dPhi_drk_out[3]=0.f; dPhi_drk_out[4]=-0.48860251190292f; dPhi_drk_out[5]=0.f;
-    dPhi_drk_out[6]=0.f; dPhi_drk_out[7]=0.f; dPhi_drk_out[8]=0.48860251190292f;
-    dPhi_drk_out[9]=-0.48860251190292f; dPhi_drk_out[10]=0.f; dPhi_drk_out[11]=0.f; if(degree==1)return;
+    dPhi_drk_out[0]=0.f; dPhi_drk_out[1]=0.f; dPhi_drk_out[2]=0.f; if(degree==0)return; // Coeff 0
+    dPhi_drk_out[3]=0.f; dPhi_drk_out[4]=-0.48860251190292f; dPhi_drk_out[5]=0.f; // Coeff 1
+    dPhi_drk_out[6]=0.f; dPhi_drk_out[7]=0.f; dPhi_drk_out[8]=0.48860251190292f; // Coeff 2
+    dPhi_drk_out[9]=-0.48860251190292f; dPhi_drk_out[10]=0.f; dPhi_drk_out[11]=0.f; if(degree==1)return; // Coeff 3
     const float C2_0v=1.092548430592079f; const float C2_1v=-1.092548430592079f; const float C2_2vs=0.9461746957575601f;
-    dPhi_drk_out[12]=(C2_0v/2.f)*y; dPhi_drk_out[13]=(C2_0v/2.f)*x; dPhi_drk_out[14]=0.f;
-    dPhi_drk_out[15]=0.f; dPhi_drk_out[16]=C2_1v*z; dPhi_drk_out[17]=C2_1v*y;
-    dPhi_drk_out[18]=0.f; dPhi_drk_out[19]=0.f; dPhi_drk_out[20]=(C2_2vs/3.f)*(6.f*z);
-    dPhi_drk_out[21]=C2_1v*z; dPhi_drk_out[22]=0.f; dPhi_drk_out[23]=C2_1v*x;
-    dPhi_drk_out[24]=(C2_0v/2.f)*(2.f*x); dPhi_drk_out[25]=(C2_0v/2.f)*(-2.f*y); dPhi_drk_out[26]=0.f; if(degree==2)return;
+    dPhi_drk_out[12]=(C2_0v/2.f)*y; dPhi_drk_out[13]=(C2_0v/2.f)*x; dPhi_drk_out[14]=0.f; // Coeff 4
+    dPhi_drk_out[15]=0.f; dPhi_drk_out[16]=C2_1v*z; dPhi_drk_out[17]=C2_1v*y; // Coeff 5
+    dPhi_drk_out[18]=0.f; dPhi_drk_out[19]=0.f; dPhi_drk_out[20]=(C2_2vs/3.f)*(6.f*z); // Coeff 6
+    dPhi_drk_out[21]=C2_1v*z; dPhi_drk_out[22]=0.f; dPhi_drk_out[23]=C2_1v*x; // Coeff 7
+    dPhi_drk_out[24]=(C2_0v/2.f)*(2.f*x); dPhi_drk_out[25]=(C2_0v/2.f)*(-2.f*y); dPhi_drk_out[26]=0.f; if(degree==2)return; // Coeff 8
     const float K9v=-0.5900435899266435f; const float K10zcv=1.445305721320277f;
     const float K11acv=-2.285228997322329f; const float K11bcv=0.4570457994644658f;
     const float K12acv=1.865881662950577f; const float K12bcv=-1.119528997770346f; const float K15v=-0.5900435899266435f;
-    dPhi_drk_out[27]=K9v*(6.f*x*y); dPhi_drk_out[28]=K9v*(3.f*x2-3.f*y2); dPhi_drk_out[29]=0.f;
-    dPhi_drk_out[30]=K10zcv*z*(2.f*y); dPhi_drk_out[31]=K10zcv*z*(2.f*x); dPhi_drk_out[32]=K10zcv*(2.f*x*y);
-    dPhi_drk_out[33]=0.f; dPhi_drk_out[34]=K11acv*z2+K11bcv; dPhi_drk_out[35]=K11acv*y*(2.f*z);
-    dPhi_drk_out[36]=0.f; dPhi_drk_out[37]=0.f; dPhi_drk_out[38]=K12acv*3.f*z2+K12bcv;
-    dPhi_drk_out[39]=K11acv*z2+K11bcv; dPhi_drk_out[40]=0.f; dPhi_drk_out[41]=K11acv*x*(2.f*z);
-    dPhi_drk_out[42]=K10zcv*z*(2.f*x); dPhi_drk_out[43]=K10zcv*z*(-2.f*y); dPhi_drk_out[44]=K10zcv*(x2-y2);
-    dPhi_drk_out[45]=K15v*(3.f*x2-3.f*y2); dPhi_drk_out[46]=K15v*(-6.f*x*y); dPhi_drk_out[47]=0.f;
+    dPhi_drk_out[27]=K9v*(6.f*x*y); dPhi_drk_out[28]=K9v*(3.f*x2-3.f*y2); dPhi_drk_out[29]=0.f; // Coeff 9
+    dPhi_drk_out[30]=K10zcv*z*(2.f*y); dPhi_drk_out[31]=K10zcv*z*(2.f*x); dPhi_drk_out[32]=K10zcv*(2.f*x*y); // Coeff 10
+    dPhi_drk_out[33]=0.f; dPhi_drk_out[34]=K11acv*z2+K11bcv; dPhi_drk_out[35]=K11acv*y*(2.f*z);  // Coeff 11
+    dPhi_drk_out[36]=0.f; dPhi_drk_out[37]=0.f; dPhi_drk_out[38]=K12acv*3.f*z2+K12bcv; // Coeff 12
+    dPhi_drk_out[39]=K11acv*z2+K11bcv; dPhi_drk_out[40]=0.f; dPhi_drk_out[41]=K11acv*x*(2.f*z); // Coeff 13
+    dPhi_drk_out[42]=K10zcv*z*(2.f*x); dPhi_drk_out[43]=K10zcv*z*(-2.f*y); dPhi_drk_out[44]=K10zcv*(x2-y2); // Coeff 14
+    dPhi_drk_out[45]=K15v*(3.f*x2-3.f*y2); dPhi_drk_out[46]=K15v*(-6.f*x*y); dPhi_drk_out[47]=0.f; // Coeff 15
 }
 
 __device__ __forceinline__ void compute_sh_color_jacobian_single_channel(
     const float* sh_coeffs_single_channel, const float* sh_basis_values,
-    const float* dPhi_drk_ptr, const glm::mat3& drk_dpk_mat,
+    const float* dPhi_drk_ptr, const glm::mat3& drk_dpk_mat_col_major,
     int num_basis_coeffs, glm::vec3& jac_out_glm
 ) {
     jac_out_glm = glm::vec3(0.0f);
     for (int i = 0; i < num_basis_coeffs; ++i) {
         glm::vec3 dPhi_drk_row_i = glm::vec3(dPhi_drk_ptr[i*3+0], dPhi_drk_ptr[i*3+1], dPhi_drk_ptr[i*3+2]);
-        glm::vec3 m_prod_row_i = dPhi_drk_row_i * drk_dpk_mat;
+        glm::vec3 m_prod_row_i = dPhi_drk_row_i * drk_dpk_mat_col_major;
         float v_i = sh_basis_values[i] * sh_coeffs_single_channel[i];
         jac_out_glm += v_i * m_prod_row_i;
     }
@@ -198,8 +194,11 @@ __device__ __forceinline__ void get_projected_cov2d_and_derivs_placeholder(
     inv_cov2d_sym_row_major[0]=1.f; inv_cov2d_sym_row_major[1]=0.f; inv_cov2d_sym_row_major[2]=1.f;
     *det_cov2d=1.f;
     d_Gk_d_pik = glm::vec2(0.f,0.f);
-    d2_Gk_d_pik2_col_major = glm::mat2(-1.f*inv_cov2d_sym_row_major[0], -1.f*inv_cov2d_sym_row_major[1],
-                                   -1.f*inv_cov2d_sym_row_major[1], -1.f*inv_cov2d_sym_row_major[2]); // Assuming symm for inv_cov
+    // Storing into column-major glm::mat2
+    d2_Gk_d_pik2_col_major[0][0] = -1.f*inv_cov2d_sym_row_major[0]; // xx
+    d2_Gk_d_pik2_col_major[1][0] = -1.f*inv_cov2d_sym_row_major[1]; // xy (col 0, row 1)
+    d2_Gk_d_pik2_col_major[0][1] = -1.f*inv_cov2d_sym_row_major[1]; // yx (col 1, row 0)
+    d2_Gk_d_pik2_col_major[1][1] = -1.f*inv_cov2d_sym_row_major[2]; // yy
 }
 
 __global__ void compute_l1l2_loss_derivatives_kernel(
@@ -271,8 +270,8 @@ __global__ void compute_position_hessian_components_kernel(
         glm::vec2 sigma_inv_diff(inv_cov2d_sym_rm[0]*diff_ndc.x+inv_cov2d_sym_rm[1]*diff_ndc.y, inv_cov2d_sym_rm[1]*diff_ndc.x+inv_cov2d_sym_rm[2]*diff_ndc.y);
         dGk_dPi = -G_k_pixel * sigma_inv_diff;
         d2Gk_dPi2_cm[0][0]=G_k_pixel*(sigma_inv_diff.x*sigma_inv_diff.x-inv_cov2d_sym_rm[0]);
-        d2Gk_dPi2_cm[1][0]=G_k_pixel*(sigma_inv_diff.x*sigma_inv_diff.y-inv_cov2d_sym_rm[1]);
-        d2Gk_dPi2_cm[0][1]=d2Gk_dPi2_cm[1][0];
+        d2Gk_dPi2_cm[1][0]=G_k_pixel*(sigma_inv_diff.x*sigma_inv_diff.y-inv_cov2d_sym_rm[1]); // For col-major mat2, this is (0,1)
+        d2Gk_dPi2_cm[0][1]=d2Gk_dPi2_cm[1][0]; // For col-major mat2, this is (1,0)
         d2Gk_dPi2_cm[1][1]=G_k_pixel*(sigma_inv_diff.y*sigma_inv_diff.y-inv_cov2d_sym_rm[2]);
 
         float alpha_k_pixel=opacity_k*G_k_pixel;
@@ -394,10 +393,10 @@ __global__ void batch_solve_1x1_system_kernel(
     if(abs(h_damped)<1e-9f){out_x[idx]=0.0f;}else{out_x[idx]=-g_val/h_damped;}
 }
 
-
 // --- LAUNCHER FUNCTIONS ---
+namespace NewtonKernels { // Start namespace for launcher definitions
 
-void NewtonKernels::compute_loss_derivatives_kernel_launcher(
+void compute_loss_derivatives_kernel_launcher(
     const torch::Tensor& rendered_image_tensor, const torch::Tensor& gt_image_tensor,
     float lambda_dssim, bool use_l2_loss_term,
     torch::Tensor& out_dL_dc_tensor, torch::Tensor& out_d2L_dc2_diag_tensor
@@ -543,8 +542,6 @@ void NewtonKernels::project_update_to_3d_kernel_launcher(
     CUDA_CHECK(cudaGetLastError());
 }
 
-// --- Definitions for Scale Optimization Launchers (Stubs) ---
-
 void NewtonKernels::compute_scale_hessian_gradient_components_kernel_launcher(
     int H_img, int W_img, int C_img,
     int P_total,
@@ -564,8 +561,8 @@ void NewtonKernels::compute_scale_hessian_gradient_components_kernel_launcher(
     torch::Tensor& out_H_s_packed,
     torch::Tensor& out_g_s
 ) {
-    if (out_H_s_packed.defined()) out_H_s_packed.zero_(); // Stub behavior
-    if (out_g_s.defined()) out_g_s.zero_();             // Stub behavior
+    if (out_H_s_packed.defined()) out_H_s_packed.zero_();
+    if (out_g_s.defined()) out_g_s.zero_();
 }
 
 void NewtonKernels::batch_solve_3x3_system_kernel_launcher(
@@ -594,8 +591,6 @@ void NewtonKernels::batch_solve_3x3_system_kernel_launcher(
     CUDA_CHECK(cudaGetLastError());
 }
 
-// --- Definitions for Rotation Optimization Launchers (Stubs) ---
-
 void NewtonKernels::compute_rotation_hessian_gradient_components_kernel_launcher(
     int H_img, int W_img, int C_img,
     int P_total,
@@ -616,8 +611,8 @@ void NewtonKernels::compute_rotation_hessian_gradient_components_kernel_launcher
     torch::Tensor& out_H_theta,
     torch::Tensor& out_g_theta
 ) {
-    if (out_H_theta.defined()) out_H_theta.zero_(); // Stub behavior
-    if (out_g_theta.defined()) out_g_theta.zero_(); // Stub behavior
+    if (out_H_theta.defined()) out_H_theta.zero_();
+    if (out_g_theta.defined()) out_g_theta.zero_();
 }
 
 void NewtonKernels::batch_solve_1x1_system_kernel_launcher(
@@ -644,8 +639,6 @@ void NewtonKernels::batch_solve_1x1_system_kernel_launcher(
     CUDA_CHECK(cudaGetLastError());
 }
 
-// --- Definitions for Opacity Optimization Launchers (Stubs) ---
-
 void NewtonKernels::compute_opacity_hessian_gradient_components_kernel_launcher(
     int H_img, int W_img, int C_img,
     int P_total,
@@ -668,8 +661,6 @@ void NewtonKernels::compute_opacity_hessian_gradient_components_kernel_launcher(
     if (out_H_sigma_base.defined()) out_H_sigma_base.zero_();
     if (out_g_sigma_base.defined()) out_g_sigma_base.zero_();
 }
-
-// --- Definitions for SH (Color) Optimization Launchers (Stubs) ---
 
 torch::Tensor NewtonKernels::compute_sh_bases_kernel_launcher(
     int sh_degree,
@@ -711,7 +702,7 @@ void NewtonKernels::compute_sh_hessian_gradient_components_kernel_launcher(
     int sh_degree,
     const torch::Tensor& sh_bases_values,
     const torch::Tensor& view_matrix,
-    const torch::Tensor& proj_param_for_sh_hess, // Renamed from K_matrix
+    const torch::Tensor& proj_param_for_sh_hess,
     const gs::RenderOutput& render_output,
     const torch::Tensor& visible_indices,
     const torch::Tensor& dL_dc_pixelwise,
