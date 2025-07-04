@@ -192,11 +192,11 @@ __global__ void compute_position_hessian_components_kernel(
     const float* perspective_proj_matrix_ptr, // Raw pointer
     const float* cam_pos_world_ptr,
     const bool* visibility_mask_for_model,
-    const float* dL_dc_pixelwise,
-    const float* d2L_dc2_diag_pixelwise,
+    //dL_dc_pixelwise, // Removed: gradient g comes from autograd
+    const float* d2L_dc2_diag_pixelwise_for_hessian, // Renamed
     int num_output_gaussians,
     float* H_p_output_packed,
-    float* grad_p_output,
+    //grad_p_output, // Removed: gradient g comes from autograd
     const int* output_index_map,
     bool debug_prints_enabled
 ) {
@@ -292,21 +292,34 @@ __global__ void compute_position_hessian_components_kernel(
         glm::vec3 J_c_pk_B=d_c_bar_B_d_pk_val*alpha_k_pixel+d_Gk_d_pk_chain_val*d_c_final_d_Gk_val.z;
 
         int pixel_idx_flat=(r*W_img+c)*C_img;
-        glm::vec3 dL_dc_val(dL_dc_pixelwise[pixel_idx_flat+0],dL_dc_pixelwise[pixel_idx_flat+1],dL_dc_pixelwise[pixel_idx_flat+2]);
-        glm::vec3 d2L_dc2_diag_val(d2L_dc2_diag_pixelwise[pixel_idx_flat+0],d2L_dc2_diag_pixelwise[pixel_idx_flat+1],d2L_dc2_diag_pixelwise[pixel_idx_flat+2]);
+        // dL_dc_val is no longer used here for gradient accumulation.
+        // glm::vec3 dL_dc_val(dL_dc_pixelwise[pixel_idx_flat+0],dL_dc_pixelwise[pixel_idx_flat+1],dL_dc_pixelwise[pixel_idx_flat+2]);
+        glm::vec3 d2L_dc2_diag_val(d2L_dc2_diag_pixelwise_for_hessian[pixel_idx_flat+0],
+                                   d2L_dc2_diag_pixelwise_for_hessian[pixel_idx_flat+1],
+                                   d2L_dc2_diag_pixelwise_for_hessian[pixel_idx_flat+2]);
 
-        g_p_k_accum_val.x+=J_c_pk_R.x*dL_dc_val.x+J_c_pk_G.x*dL_dc_val.y+J_c_pk_B.x*dL_dc_val.z;
-        g_p_k_accum_val.y+=J_c_pk_R.y*dL_dc_val.x+J_c_pk_G.y*dL_dc_val.y+J_c_pk_B.y*dL_dc_val.z;
-        g_p_k_accum_val.z+=J_c_pk_R.z*dL_dc_val.x+J_c_pk_G.z*dL_dc_val.y+J_c_pk_B.z*dL_dc_val.z;
+        // Gradient accumulation is removed.
+        // g_p_k_accum_val.x+=J_c_pk_R.x*dL_dc_val.x+J_c_pk_G.x*dL_dc_val.y+J_c_pk_B.x*dL_dc_val.z;
+        // g_p_k_accum_val.y+=J_c_pk_R.y*dL_dc_val.x+J_c_pk_G.y*dL_dc_val.y+J_c_pk_B.y*dL_dc_val.z;
+        // g_p_k_accum_val.z+=J_c_pk_R.z*dL_dc_val.x+J_c_pk_G.z*dL_dc_val.y+J_c_pk_B.z*dL_dc_val.z;
 
+        // Hessian term H_p_k_accum_symm += J_c_pk^T * d2L/dc2 * J_c_pk
+        // This part remains as it's part of the Hessian.
+        // The second term of the Hessian from the paper (dL/dc * d2c/dp2) is more complex and might be approximated or handled.
+        // For now, we focus on the J^T * H_L * J part.
         H_p_k_accum_symm[0]+=J_c_pk_R.x*d2L_dc2_diag_val.x*J_c_pk_R.x+J_c_pk_G.x*d2L_dc2_diag_val.y*J_c_pk_G.x+J_c_pk_B.x*d2L_dc2_diag_val.z*J_c_pk_B.x;
         H_p_k_accum_symm[1]+=J_c_pk_R.x*d2L_dc2_diag_val.x*J_c_pk_R.y+J_c_pk_G.x*d2L_dc2_diag_val.y*J_c_pk_G.y+J_c_pk_B.x*d2L_dc2_diag_val.z*J_c_pk_B.y;
         H_p_k_accum_symm[2]+=J_c_pk_R.x*d2L_dc2_diag_val.x*J_c_pk_R.z+J_c_pk_G.x*d2L_dc2_diag_val.y*J_c_pk_G.z+J_c_pk_B.x*d2L_dc2_diag_val.z*J_c_pk_B.z;
         H_p_k_accum_symm[3]+=J_c_pk_R.y*d2L_dc2_diag_val.x*J_c_pk_R.y+J_c_pk_G.y*d2L_dc2_diag_val.y*J_c_pk_G.y+J_c_pk_B.y*d2L_dc2_diag_val.z*J_c_pk_B.y;
         H_p_k_accum_symm[4]+=J_c_pk_R.y*d2L_dc2_diag_val.x*J_c_pk_R.z+J_c_pk_G.y*d2L_dc2_diag_val.y*J_c_pk_G.z+J_c_pk_B.y*d2L_dc2_diag_val.z*J_c_pk_B.z;
         H_p_k_accum_symm[5]+=J_c_pk_R.z*d2L_dc2_diag_val.x*J_c_pk_R.z+J_c_pk_G.z*d2L_dc2_diag_val.y*J_c_pk_G.z+J_c_pk_B.z*d2L_dc2_diag_val.z*J_c_pk_B.z;
+        // TODO: Add the dL/dc * d2c/dp2 term to the Hessian if required and feasible.
+        // This term involves dL/dc (which would now be from autograd, making it complex to pass here per pixel)
+        // and d2c/dp2 (second derivative of color function w.r.t position), which is also non-trivial.
+        // For now, we assume the J^T H_L J term is dominant or sufficient.
     }}
-    grad_p_output[output_idx*3+0]=g_p_k_accum_val.x; grad_p_output[output_idx*3+1]=g_p_k_accum_val.y; grad_p_output[output_idx*3+2]=g_p_k_accum_val.z;
+    // Writing to grad_p_output is removed.
+    // grad_p_output[output_idx*3+0]=g_p_k_accum_val.x; grad_p_output[output_idx*3+1]=g_p_k_accum_val.y; grad_p_output[output_idx*3+2]=g_p_k_accum_val.z;
     for(int i=0;i<6;++i)H_p_output_packed[output_idx*6+i]=H_p_k_accum_symm[i];
 }
 
@@ -447,11 +460,11 @@ void NewtonKernels::compute_position_hessian_components_kernel_launcher(
     const float* projection_matrix_for_jacobian, // Matched with .cuh
     const float* cam_pos_world, // Matched with .cuh
     const torch::Tensor& visibility_mask_for_model_tensor,
-    const float* dL_dc_pixelwise, // Matched with .cuh
-    const float* d2L_dc2_diag_pixelwise, // Matched with .cuh
+    //dL_dc_pixelwise, // Removed
+    const float* d2L_dc2_diag_pixelwise_for_hessian, // Renamed
     int num_output_gaussians,
     float* H_p_output_packed, // Matched with .cuh
-    float* grad_p_output,   // Matched with .cuh
+    //grad_p_output,   // Removed
     bool debug_prints_enabled
 ) {
     TORCH_CHECK(visibility_mask_for_model_tensor.defined(), "visibility_mask_for_model_tensor is not defined in launcher.");
@@ -496,11 +509,11 @@ void NewtonKernels::compute_position_hessian_components_kernel_launcher(
         cam_pos_world, // Use cam_pos_world
         // Parameters means_2d_render, depths_render, radii_render, P_render are removed from __global__ kernel call
         visibility_mask_gpu_ptr,
-        dL_dc_pixelwise, // Use dL_dc_pixelwise
-        d2L_dc2_diag_pixelwise, // Use d2L_dc2_diag_pixelwise
+        //dL_dc_pixelwise, // Removed
+        d2L_dc2_diag_pixelwise_for_hessian, // Use renamed
         num_output_gaussians,
         H_p_output_packed, // Use H_p_output_packed
-        grad_p_output,   // Use grad_p_output
+        //grad_p_output,   // Removed
         output_index_map_gpu,
         debug_prints_enabled
     );
@@ -544,27 +557,102 @@ void NewtonKernels::project_update_to_3d_kernel_launcher(
     CUDA_CHECK(cudaGetLastError());
 }
 
-void NewtonKernels::compute_scale_hessian_gradient_components_kernel_launcher(
+// Placeholder __global__ kernel for scale Hessian components
+__global__ void compute_scale_hessian_components_kernel(
+    int H_img, int W_img, int C_img,
+    int P_total,
+    const float* means_all_ptr,
+    const float* log_scales_all_ptr, // scales are raw log_scales
+    const float* rotations_all_ptr,
+    const float* opacities_logits_all_ptr, // opacities are raw logits
+    const float* shs_all_ptr,
+    int sh_degree,
+    const float* view_matrix_ptr,
+    const float* K_matrix_ptr,
+    const float* cam_pos_world_ptr,
+    // const gs::RenderOutput& render_output, // Difficult to pass directly, pass components
+    const int* visible_indices_ptr,
+    int num_visible_gaussians,
+    const float* d2L_dc2_diag_pixelwise_for_hessian_ptr,
+    float* out_H_s_packed_ptr // Output: [num_visible_gaussians, 6]
+) {
+    // THIS IS A PLACEHOLDER KERNEL.
+    // The actual implementation would involve:
+    // 1. Iterate `idx` from 0 to `num_visible_gaussians - 1`.
+    // 2. Get `p_idx_total = visible_indices_ptr[idx]`.
+    // 3. For Gaussian `p_idx_total`:
+    //    a. Get its parameters (means, log_scales, rotations, etc.).
+    //    b. Compute Jacobian of pixel color w.r.t. log_scales (J_s). This is complex.
+    //       It involves derivatives of exp(log_scale), covariance matrix, projection, and color rendering.
+    //    c. Accumulate J_s^T * (d2L/dc2) * J_s over all relevant pixels.
+    //       (And potentially the (dL/dc * d2c/ds2) term if not negligible, though dL/dc is not passed here).
+    //    d. Store the 3x3 symmetric Hessian (6 unique values) in `out_H_s_packed_ptr[idx * 6 + ...]`.
+
+    // For now, just zero out the output for the current thread's Gaussian if it's responsible for one.
+    int p_vis_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (p_vis_idx < num_visible_gaussians) {
+        for (int i = 0; i < 6; ++i) {
+            out_H_s_packed_ptr[p_vis_idx * 6 + i] = 0.0f; // Example: Initialize to zero
+        }
+        // Example: Set diagonal elements to a small value for testing solver
+        // out_H_s_packed_ptr[p_vis_idx * 6 + 0] = 1.0f; // H_ss_xx
+        // out_H_s_packed_ptr[p_vis_idx * 6 + 3] = 1.0f; // H_ss_yy
+        // out_H_s_packed_ptr[p_vis_idx * 6 + 5] = 1.0f; // H_ss_zz
+    }
+}
+
+void NewtonKernels::compute_scale_hessian_components_kernel_launcher(
     int H_img, int W_img, int C_img,
     int P_total,
     const torch::Tensor& means_all,
-    const torch::Tensor& scales_all,
+    const torch::Tensor& scales_all_raw, // raw log_scales
     const torch::Tensor& rotations_all,
-    const torch::Tensor& opacities_all,
+    const torch::Tensor& opacities_all_raw, // raw logits
     const torch::Tensor& shs_all,
     int sh_degree,
     const torch::Tensor& view_matrix,
     const torch::Tensor& K_matrix,
     const torch::Tensor& cam_pos_world,
-    const gs::RenderOutput& render_output,
+    const gs::RenderOutput& render_output, // Keep for now, might need parts of it
     const torch::Tensor& visible_indices,
-    const torch::Tensor& dL_dc_pixelwise,
-    const torch::Tensor& d2L_dc2_diag_pixelwise,
-    torch::Tensor& out_H_s_packed,
-    torch::Tensor& out_g_s
+    const torch::Tensor& d2L_dc2_diag_pixelwise_for_hessian,
+    torch::Tensor& out_H_s_packed
 ) {
-    if (out_H_s_packed.defined()) out_H_s_packed.zero_();
-    if (out_g_s.defined()) out_g_s.zero_();
+    TORCH_CHECK(out_H_s_packed.defined(), "out_H_s_packed must be defined.");
+    TORCH_CHECK(visible_indices.dim() == 1, "visible_indices must be 1D.");
+    int num_visible_gaussians = visible_indices.size(0);
+
+    if (num_visible_gaussians == 0) {
+        return; // No work to do
+    }
+
+    TORCH_CHECK(out_H_s_packed.size(0) == num_visible_gaussians && out_H_s_packed.size(1) == 6,
+                "out_H_s_packed shape mismatch. Expected [num_visible_gaussians, 6]");
+
+    // Zero out the output tensor before filling, as kernel might not write all entries if P_total is used for grid.
+    // Or ensure kernel writes zeros for non-visible if iterating P_total.
+    // Current placeholder kernel iterates num_visible_gaussians, so zeroing here is good.
+    out_H_s_packed.zero_();
+
+
+    compute_scale_hessian_components_kernel<<<GET_BLOCKS(num_visible_gaussians), CUDA_NUM_THREADS>>>(
+        H_img, W_img, C_img,
+        P_total, // Still pass P_total if kernel needs it for indexing into full arrays
+        gs::torch_utils::get_const_data_ptr<float>(means_all, "means_all"),
+        gs::torch_utils::get_const_data_ptr<float>(scales_all_raw, "scales_all_raw"),
+        gs::torch_utils::get_const_data_ptr<float>(rotations_all, "rotations_all"),
+        gs::torch_utils::get_const_data_ptr<float>(opacities_all_raw, "opacities_all_raw"),
+        gs::torch_utils::get_const_data_ptr<float>(shs_all, "shs_all"),
+        sh_degree,
+        gs::torch_utils::get_const_data_ptr<float>(view_matrix, "view_matrix"),
+        gs::torch_utils::get_const_data_ptr<float>(K_matrix, "K_matrix"),
+        gs::torch_utils::get_const_data_ptr<float>(cam_pos_world, "cam_pos_world"),
+        gs::torch_utils::get_const_data_ptr<int>(visible_indices, "visible_indices"),
+        num_visible_gaussians,
+        gs::torch_utils::get_const_data_ptr<float>(d2L_dc2_diag_pixelwise_for_hessian, "d2L_dc2_diag_pixelwise_for_hessian"),
+        gs::torch_utils::get_data_ptr<float>(out_H_s_packed, "out_H_s_packed")
+    );
+    CUDA_CHECK(cudaGetLastError());
 }
 
 void NewtonKernels::batch_solve_3x3_system_kernel_launcher(
@@ -593,28 +681,93 @@ void NewtonKernels::batch_solve_3x3_system_kernel_launcher(
     CUDA_CHECK(cudaGetLastError());
 }
 
-void NewtonKernels::compute_rotation_hessian_gradient_components_kernel_launcher(
+// Placeholder __global__ kernel for rotation Hessian components (scalar theta)
+__global__ void compute_rotation_hessian_components_kernel(
+    int H_img, int W_img, int C_img,
+    int P_total,
+    const float* means_all_ptr,
+    const float* log_scales_all_ptr,
+    const float* rotations_all_raw_ptr, // raw quaternions
+    const float* opacities_logits_all_ptr,
+    const float* shs_all_ptr,
+    int sh_degree,
+    const float* view_matrix_ptr,
+    const float* K_matrix_ptr,
+    const float* cam_pos_world_ptr,
+    const float* r_k_vecs_ptr, // [num_visible_gaussians, 3] rotation axes
+    // const gs::RenderOutput& render_output, // Pass components
+    const int* visible_indices_ptr,
+    int num_visible_gaussians,
+    const float* d2L_dc2_diag_pixelwise_for_hessian_ptr,
+    float* out_H_theta_ptr // Output: [num_visible_gaussians, 1]
+) {
+    // THIS IS A PLACEHOLDER KERNEL.
+    // Actual implementation:
+    // 1. Iterate `idx` from 0 to `num_visible_gaussians - 1`.
+    // 2. Get `p_idx_total = visible_indices_ptr[idx]`.
+    // 3. For Gaussian `p_idx_total`:
+    //    a. Get parameters.
+    //    b. Compute Jacobian of pixel color w.r.t. rotation angle theta_k (J_theta).
+    //       This involves derivatives of quaternion operations, covariance, projection, color.
+    //    c. Accumulate J_theta^T * (d2L/dc2) * J_theta over relevant pixels.
+    //    d. Store scalar Hessian in `out_H_theta_ptr[idx]`.
+
+    int p_vis_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (p_vis_idx < num_visible_gaussians) {
+        out_H_theta_ptr[p_vis_idx] = 0.0f; // Example: Initialize to zero
+        // out_H_theta_ptr[p_vis_idx] = 1.0f; // Example for testing solver
+    }
+}
+
+void NewtonKernels::compute_rotation_hessian_components_kernel_launcher(
     int H_img, int W_img, int C_img,
     int P_total,
     const torch::Tensor& means_all,
-    const torch::Tensor& scales_all,
-    const torch::Tensor& rotations_all,
-    const torch::Tensor& opacities_all,
+    const torch::Tensor& scales_all_raw,
+    const torch::Tensor& rotations_all_raw,
+    const torch::Tensor& opacities_all_raw,
     const torch::Tensor& shs_all,
     int sh_degree,
     const torch::Tensor& view_matrix,
     const torch::Tensor& K_matrix,
     const torch::Tensor& cam_pos_world,
-    const torch::Tensor& r_k_vecs,
+    const torch::Tensor& r_k_vecs, // Assumed to be [N_vis, 3]
     const gs::RenderOutput& render_output,
     const torch::Tensor& visible_indices,
-    const torch::Tensor& dL_dc_pixelwise,
-    const torch::Tensor& d2L_dc2_diag_pixelwise,
-    torch::Tensor& out_H_theta,
-    torch::Tensor& out_g_theta
+    const torch::Tensor& d2L_dc2_diag_pixelwise_for_hessian,
+    torch::Tensor& out_H_theta
 ) {
-    if (out_H_theta.defined()) out_H_theta.zero_();
-    if (out_g_theta.defined()) out_g_theta.zero_();
+    TORCH_CHECK(out_H_theta.defined(), "out_H_theta must be defined.");
+    TORCH_CHECK(visible_indices.dim() == 1, "visible_indices must be 1D.");
+    int num_visible_gaussians = visible_indices.size(0);
+
+    if (num_visible_gaussians == 0) {
+        return;
+    }
+    TORCH_CHECK(out_H_theta.size(0) == num_visible_gaussians && (out_H_theta.dim() == 1 || out_H_theta.size(1) == 1),
+                "out_H_theta shape mismatch. Expected [num_visible_gaussians] or [num_visible_gaussians, 1]");
+    TORCH_CHECK(r_k_vecs.size(0) == num_visible_gaussians, "r_k_vecs size mismatch with num_visible_gaussians");
+
+    out_H_theta.zero_();
+
+    compute_rotation_hessian_components_kernel<<<GET_BLOCKS(num_visible_gaussians), CUDA_NUM_THREADS>>>(
+        H_img, W_img, C_img, P_total,
+        gs::torch_utils::get_const_data_ptr<float>(means_all, "means_all"),
+        gs::torch_utils::get_const_data_ptr<float>(scales_all_raw, "scales_all_raw"),
+        gs::torch_utils::get_const_data_ptr<float>(rotations_all_raw, "rotations_all_raw"),
+        gs::torch_utils::get_const_data_ptr<float>(opacities_all_raw, "opacities_all_raw"),
+        gs::torch_utils::get_const_data_ptr<float>(shs_all, "shs_all"),
+        sh_degree,
+        gs::torch_utils::get_const_data_ptr<float>(view_matrix, "view_matrix"),
+        gs::torch_utils::get_const_data_ptr<float>(K_matrix, "K_matrix"),
+        gs::torch_utils::get_const_data_ptr<float>(cam_pos_world, "cam_pos_world"),
+        gs::torch_utils::get_const_data_ptr<float>(r_k_vecs, "r_k_vecs"),
+        gs::torch_utils::get_const_data_ptr<int>(visible_indices, "visible_indices"),
+        num_visible_gaussians,
+        gs::torch_utils::get_const_data_ptr<float>(d2L_dc2_diag_pixelwise_for_hessian, "d2L_dc2_diag_pixelwise_for_hessian"),
+        gs::torch_utils::get_data_ptr<float>(out_H_theta, "out_H_theta")
+    );
+    CUDA_CHECK(cudaGetLastError());
 }
 
 void NewtonKernels::batch_solve_1x1_system_kernel_launcher(
@@ -641,13 +794,53 @@ void NewtonKernels::batch_solve_1x1_system_kernel_launcher(
     CUDA_CHECK(cudaGetLastError());
 }
 
-void NewtonKernels::compute_opacity_hessian_gradient_components_kernel_launcher(
+// Placeholder __global__ kernel for opacity Hessian components
+__global__ void compute_opacity_hessian_components_kernel(
+    int H_img, int W_img, int C_img,
+    int P_total,
+    const float* means_all_ptr,
+    const float* log_scales_all_ptr,
+    const float* rotations_all_raw_ptr,
+    const float* opacities_logits_all_ptr,
+    const float* shs_all_ptr,
+    int sh_degree,
+    const float* view_matrix_ptr,
+    const float* K_matrix_ptr,
+    const float* cam_pos_world_ptr,
+    // const gs::RenderOutput& render_output, // Pass components
+    const int* visible_indices_ptr,
+    int num_visible_gaussians,
+    const float* d2L_dc2_diag_pixelwise_for_hessian_ptr,
+    float* out_H_opacity_base_ptr // Output: [num_visible_gaussians] (scalar Hessian base term)
+) {
+    // THIS IS A PLACEHOLDER KERNEL.
+    // Actual implementation:
+    // 1. Iterate `idx` from 0 to `num_visible_gaussians - 1`.
+    // 2. Get `p_idx_total = visible_indices_ptr[idx]`.
+    // 3. For Gaussian `p_idx_total`:
+    //    a. Get parameters.
+    //    b. Compute Jacobian of pixel color w.r.t. opacity logit (J_opacity_logit).
+    //       This involves dc/d_sigma * d_sigma/d_logit, where sigma is sigmoid(logit).
+    //       The paper states d2c/d(sigma)^2 = 0, which simplifies the J^T H_L J term.
+    //    c. Accumulate J_opacity_logit^T * (d2L/dc2) * J_opacity_logit over relevant pixels.
+    //    d. Store scalar Hessian base term in `out_H_opacity_base_ptr[idx]`.
+    // The barrier term for opacity is added in C++ later.
+
+    int p_vis_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (p_vis_idx < num_visible_gaussians) {
+        out_H_opacity_base_ptr[p_vis_idx] = 0.0f; // Example: Initialize to zero
+        // out_H_opacity_base_ptr[p_vis_idx] = 1.0f; // Example for testing solver
+    }
+}
+
+
+void NewtonKernels::compute_opacity_hessian_components_kernel_launcher(
     int H_img, int W_img, int C_img,
     int P_total,
     const torch::Tensor& means_all,
-    const torch::Tensor& scales_all,
-    const torch::Tensor& rotations_all,
-    const torch::Tensor& opacities_all,
+    const torch::Tensor& scales_all_raw,
+    const torch::Tensor& rotations_all_raw,
+    const torch::Tensor& opacities_all_raw, // These are raw logits
     const torch::Tensor& shs_all,
     int sh_degree,
     const torch::Tensor& view_matrix,
@@ -655,13 +848,39 @@ void NewtonKernels::compute_opacity_hessian_gradient_components_kernel_launcher(
     const torch::Tensor& cam_pos_world,
     const gs::RenderOutput& render_output,
     const torch::Tensor& visible_indices,
-    const torch::Tensor& dL_dc_pixelwise,
-    const torch::Tensor& d2L_dc2_diag_pixelwise,
-    torch::Tensor& out_H_sigma_base,
-    torch::Tensor& out_g_sigma_base
+    const torch::Tensor& d2L_dc2_diag_pixelwise_for_hessian,
+    torch::Tensor& out_H_opacity_base // Output: [N_vis]
 ) {
-    if (out_H_sigma_base.defined()) out_H_sigma_base.zero_();
-    if (out_g_sigma_base.defined()) out_g_sigma_base.zero_();
+    TORCH_CHECK(out_H_opacity_base.defined(), "out_H_opacity_base must be defined.");
+    TORCH_CHECK(visible_indices.dim() == 1, "visible_indices must be 1D.");
+    int num_visible_gaussians = visible_indices.size(0);
+
+    if (num_visible_gaussians == 0) {
+        return;
+    }
+    TORCH_CHECK(out_H_opacity_base.size(0) == num_visible_gaussians &&
+                (out_H_opacity_base.dim() == 1 || out_H_opacity_base.size(1) == 1),
+                "out_H_opacity_base shape mismatch. Expected [num_visible_gaussians] or [num_visible_gaussians, 1]");
+
+    out_H_opacity_base.zero_();
+
+    compute_opacity_hessian_components_kernel<<<GET_BLOCKS(num_visible_gaussians), CUDA_NUM_THREADS>>>(
+        H_img, W_img, C_img, P_total,
+        gs::torch_utils::get_const_data_ptr<float>(means_all, "means_all"),
+        gs::torch_utils::get_const_data_ptr<float>(scales_all_raw, "scales_all_raw"),
+        gs::torch_utils::get_const_data_ptr<float>(rotations_all_raw, "rotations_all_raw"),
+        gs::torch_utils::get_const_data_ptr<float>(opacities_all_raw, "opacities_all_raw"),
+        gs::torch_utils::get_const_data_ptr<float>(shs_all, "shs_all"),
+        sh_degree,
+        gs::torch_utils::get_const_data_ptr<float>(view_matrix, "view_matrix"),
+        gs::torch_utils::get_const_data_ptr<float>(K_matrix, "K_matrix"),
+        gs::torch_utils::get_const_data_ptr<float>(cam_pos_world, "cam_pos_world"),
+        gs::torch_utils::get_const_data_ptr<int>(visible_indices, "visible_indices"),
+        num_visible_gaussians,
+        gs::torch_utils::get_const_data_ptr<float>(d2L_dc2_diag_pixelwise_for_hessian, "d2L_dc2_diag_pixelwise_for_hessian"),
+        gs::torch_utils::get_data_ptr<float>(out_H_opacity_base, "out_H_opacity_base")
+    );
+    CUDA_CHECK(cudaGetLastError());
 }
 
 torch::Tensor NewtonKernels::compute_sh_bases_kernel_launcher(

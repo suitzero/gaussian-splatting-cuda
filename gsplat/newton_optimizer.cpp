@@ -37,13 +37,14 @@ NewtonOptimizer::LossDerivatives NewtonOptimizer::compute_loss_derivatives_cuda(
 }
 
 // --- Position (Means) ---
+// Computes only the Hessian components for position. Gradient comes from autograd.
 NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian_components_cuda(
     const SplatData& model_snapshot,
     const torch::Tensor& visibility_mask_for_model,
     const Camera& camera,
-    const gs::RenderOutput& render_output, // Contains data for rasterizer-culled Gaussians
-    const LossDerivatives& loss_derivs,
-    int num_visible_gaussians_in_total_model // Number of Gaussians to produce output for
+    const gs::RenderOutput& render_output,
+    const torch::Tensor& d2L_dc2_diag_pixelwise_for_hessian, // Directly passed
+    int num_visible_gaussians_in_total_model
 ) {
     // Use const getter for SplatData when model_snapshot is const
     torch::Tensor means_tensor = model_snapshot.get_means();
@@ -53,7 +54,7 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
 
     // Output tensors for the *num_visible_gaussians_in_total_model*
     torch::Tensor H_p_output_packed = torch::zeros({num_visible_gaussians_in_total_model, 6}, tensor_opts);
-    torch::Tensor grad_p_output = torch::zeros({num_visible_gaussians_in_total_model, 3}, tensor_opts);
+    // grad_p_output is removed from here, it will come from autograd_grad_means
 
     // Prepare camera parameters
     torch::Tensor view_mat_tensor_orig = camera.world_view_transform().to(dev).to(dtype);
@@ -102,10 +103,10 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
         print_tensor_info("render_output.means2d", render_output.means2d);
         print_tensor_info("render_output.depths", render_output.depths);
         print_tensor_info("render_output.radii (original)", render_output.radii); // Check original radii
-        print_tensor_info("loss_derivs.dL_dc", loss_derivs.dL_dc);
-        print_tensor_info("loss_derivs.d2L_dc2_diag", loss_derivs.d2L_dc2_diag);
+        // print_tensor_info("loss_derivs.dL_dc", loss_derivs.dL_dc); // dL_dc comes from autograd
+        print_tensor_info("d2L_dc2_diag_pixelwise_for_hessian", d2L_dc2_diag_pixelwise_for_hessian);
         print_tensor_info("H_p_output_packed", H_p_output_packed);
-        print_tensor_info("grad_p_output", grad_p_output);
+        // print_tensor_info("grad_p_output", grad_p_output); // grad_p comes from autograd
         // visibility_mask_for_model is bool, get_const_data_ptr<bool> will check its contiguity.
         print_tensor_info("visibility_mask_for_model", visibility_mask_for_model);
     }
@@ -225,10 +226,10 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
         verbose_tensor_check_lambda("render_output.depths", render_output.depths, "float");
         verbose_tensor_check_lambda("radii_for_kernel_tensor", radii_for_kernel_tensor, "float"); // After potential cast
         verbose_tensor_check_lambda("visibility_mask_for_model", visibility_mask_for_model, "bool");
-        verbose_tensor_check_lambda("loss_derivs.dL_dc", loss_derivs.dL_dc, "float");
-        verbose_tensor_check_lambda("loss_derivs.d2L_dc2_diag", loss_derivs.d2L_dc2_diag, "float");
+        // verbose_tensor_check_lambda("loss_derivs.dL_dc", loss_derivs.dL_dc, "float"); // dL_dc comes from autograd
+        verbose_tensor_check_lambda("d2L_dc2_diag_pixelwise_for_hessian", d2L_dc2_diag_pixelwise_for_hessian, "float");
         verbose_tensor_check_lambda("H_p_output_packed", H_p_output_packed, "float");
-        verbose_tensor_check_lambda("grad_p_output", grad_p_output, "float");
+        // verbose_tensor_check_lambda("grad_p_output", grad_p_output, "float"); // grad_p comes from autograd
     }
 
     // Prepare arguments for kernel launcher by getting data pointers
@@ -254,10 +255,10 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
         verbose_tensor_check_lambda("render_output.depths", render_output.depths, "float");
         verbose_tensor_check_lambda("radii_for_kernel_tensor", radii_for_kernel_tensor, "float"); // Already local
         verbose_tensor_check_lambda("visibility_mask_for_model", visibility_mask_for_model, "bool"); // Already local
-        verbose_tensor_check_lambda("loss_derivs.dL_dc", loss_derivs.dL_dc, "float");
-        verbose_tensor_check_lambda("loss_derivs.d2L_dc2_diag", loss_derivs.d2L_dc2_diag, "float");
+        // verbose_tensor_check_lambda("loss_derivs.dL_dc", loss_derivs.dL_dc, "float");
+        verbose_tensor_check_lambda("d2L_dc2_diag_pixelwise_for_hessian", d2L_dc2_diag_pixelwise_for_hessian, "float");
         verbose_tensor_check_lambda("H_p_output_packed", H_p_output_packed, "float"); // Already local
-        verbose_tensor_check_lambda("grad_p_output", grad_p_output, "float"); // Already local
+        // verbose_tensor_check_lambda("grad_p_output", grad_p_output, "float");
     }
 
     const float* means_3d_all_ptr = gs::torch_utils::get_const_data_ptr<float>(arg_means3D, "arg_means3D");
@@ -272,13 +273,13 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
     const float* depths_render_ptr = gs::torch_utils::get_const_data_ptr<float>(render_output.depths, "render_output.depths");
     const float* radii_render_ptr = gs::torch_utils::get_const_data_ptr<float>(radii_for_kernel_tensor, "radii_for_kernel_tensor");
     // No longer need visibility_mask_for_model_ptr here, pass the tensor directly
-    const float* dL_dc_pixelwise_ptr = gs::torch_utils::get_const_data_ptr<float>(loss_derivs.dL_dc, "loss_derivs.dL_dc");
-    const float* d2L_dc2_diag_pixelwise_ptr = gs::torch_utils::get_const_data_ptr<float>(loss_derivs.d2L_dc2_diag, "loss_derivs.d2L_dc2_diag");
+    // const float* dL_dc_pixelwise_ptr = gs::torch_utils::get_const_data_ptr<float>(loss_derivs.dL_dc, "loss_derivs.dL_dc"); // Removed
+    const float* d2L_dc2_diag_pixelwise_for_hessian_ptr = gs::torch_utils::get_const_data_ptr<float>(d2L_dc2_diag_pixelwise_for_hessian, "d2L_dc2_diag_pixelwise_for_hessian");
     float* H_p_output_packed_ptr = gs::torch_utils::get_data_ptr<float>(H_p_output_packed, "H_p_output_packed");
-    float* grad_p_output_ptr = gs::torch_utils::get_data_ptr<float>(grad_p_output, "grad_p_output");
+    // float* grad_p_output_ptr = gs::torch_utils::get_data_ptr<float>(grad_p_output, "grad_p_output"); // Removed
 
     NewtonKernels::compute_position_hessian_components_kernel_launcher(
-        render_output.height, render_output.width, static_cast<int>(loss_derivs.dL_dc.size(-1)), // Image: H, W, C (Use dL_dc for C)
+        render_output.height, render_output.width, static_cast<int>(d2L_dc2_diag_pixelwise_for_hessian.size(-1)), // Image: H, W, C
         p_total_for_kernel, // Total P Gaussians in model
         means_3d_all_ptr,
         scales_all_ptr,
@@ -291,15 +292,15 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
         K_matrix_ptr,    // camera projection matrix (intrinsic K, possibly combined with extrinsics for full P) - named projection_matrix_for_jacobian in kernel
         cam_pos_world_ptr,
         visibility_mask_for_model, // Pass the tensor object directly
-        dL_dc_pixelwise_ptr,
-        d2L_dc2_diag_pixelwise_ptr,
+        // dL_dc_pixelwise_ptr, // Removed
+        d2L_dc2_diag_pixelwise_for_hessian_ptr, // Use new pointer
         num_visible_gaussians_in_total_model, // Number of Gaussians to produce output for (visible and in model)
         H_p_output_packed_ptr,
-        grad_p_output_ptr,
+        // grad_p_output_ptr, // Removed
         options_.debug_print_shapes // Pass the flag
     );
 
-    return {H_p_output_packed, grad_p_output};
+    return {H_p_output_packed}; // grad_p_output removed from struct
 }
 
 torch::Tensor NewtonOptimizer::compute_projected_position_hessian_and_gradient(
@@ -421,19 +422,21 @@ torch::Tensor NewtonOptimizer::solve_and_project_position_updates(
 }
 
 
-// Main step function (partial implementation for position)
+// Main step function
 void NewtonOptimizer::step(int iteration,
-                           const torch::Tensor& visibility_mask_for_model, // Boolean mask for model_.means() [Total_N]
-                           const gs::RenderOutput& current_render_output, // From primary target
+                           const torch::Tensor& visibility_mask_for_model, // Boolean mask for model_.means() [N_total]
+                           const torch::Tensor& autograd_grad_means_total,       // [N_total, 3]
+                           const torch::Tensor& autograd_grad_scales_raw_total,  // [N_total, 3]
+                           const torch::Tensor& autograd_grad_rotation_raw_total, // [N_total, 4]
+                           const torch::Tensor& autograd_grad_opacity_raw_total, // [N_total, 1]
+                           const torch::Tensor& autograd_grad_sh0_total,         // [N_total, 1, 3]
+                           const torch::Tensor& autograd_grad_shN_total,         // [N_total, K-1, 3]
+                           const gs::RenderOutput& current_render_output,
                            const Camera& primary_camera,
-                           const torch::Tensor& primary_gt_image, // Already on device [H,W,C]
+                           const torch::Tensor& primary_gt_image,
                            const std::vector<std::pair<const Camera*, torch::Tensor>>& knn_secondary_targets_data) {
 
-    if (!options_.optimize_means) {
-        return;
-    }
-
-    torch::NoGradGuard no_grad;
+    torch::NoGradGuard no_grad; // Ensure no graph operations are tracked for optimizer steps
 
     torch::Tensor visible_indices = torch::where(visibility_mask_for_model)[0];
     int num_visible_gaussians_in_model = visible_indices.size(0);
@@ -451,13 +454,16 @@ void NewtonOptimizer::step(int iteration,
         if (options_.debug_print_shapes) {
              std::cout << "[NewtonOpt] Step: No visible Gaussians based on mask at iteration " << iteration << ". Skipping Newton update." << std::endl;
         }
-        return; // Early exit
+        return; // Early exit if no Gaussians are visible
     }
 
-    torch::Tensor means_visible_from_model = model_.means().detach().index_select(0, visible_indices);
+    // Only proceed with means optimization if enabled
+    if (options_.optimize_means) {
+        torch::Tensor means_visible_from_model = model_.means().detach().index_select(0, visible_indices);
+        torch::Tensor grad_means_visible_autograd = autograd_grad_means_total.index_select(0, visible_indices);
 
-    // I. Compute Loss Derivatives for primary target
-    torch::Tensor rendered_image_squeezed = current_render_output.image.squeeze(0);
+        // I. Compute d2L/dc2 for primary target (dL/dc comes from autograd_grad_means)
+        torch::Tensor rendered_image_squeezed = current_render_output.image.squeeze(0);
     torch::Tensor gt_image_prepared = primary_gt_image;
 
     // Ensure rendered_image is HWC
@@ -478,37 +484,29 @@ void NewtonOptimizer::step(int iteration,
         gt_image_prepared,
         options_.lambda_dssim_for_hessian,
         options_.use_l2_for_hessian_L_term
-    );
+    ); // This computes both dL_dc and d2L_dc2_diag. We only need d2L_dc2_diag for H.
 
-    // II. Compute Hessian components (H_p, g_p) for primary target
-    if (options_.debug_print_shapes) {
-        std::cout << "[NewtonOpt STEP] Checking this->model_ BEFORE call to compute_position_hessian_components_cuda:" << std::endl;
-        const SplatData& model_ref_in_step = this->model_;
-        std::cout << "  - model_ref_in_step.get_means().defined(): " << model_ref_in_step.get_means().defined() << std::endl;
-        if (model_ref_in_step.get_means().defined()) {
-            std::cout << "  - model_ref_in_step.get_means().sizes(): " << model_ref_in_step.get_means().sizes() << std::endl;
-            try {
-                std::cout << "  - model_ref_in_step.size() direct call: " << model_ref_in_step.size() << std::endl;
-            } catch (const c10::Error& e) {
-                std::cout << "  - model_ref_in_step.size() direct call: FAILED with c10::Error: " << e.what_without_backtrace() << std::endl;
-            } catch (const std::exception& e) {
-                std::cout << "  - model_ref_in_step.size() direct call: FAILED with std::exception: " << e.what() << std::endl;
-            } catch (...) {
-                std::cout << "  - model_ref_in_step.size() direct call: FAILED with unknown exception." << std::endl;
-            }
-        } else {
-            std::cout << "  - model_ref_in_step.get_means() is UNDEFINED." << std::endl;
+    // II. Compute Hessian components (H_p) for primary target. Gradient g_p comes from autograd.
+        if (options_.debug_print_shapes) {
+            std::cout << "[NewtonOpt STEP] Checking this->model_ BEFORE call to compute_position_hessian_components_cuda:" << std::endl;
+            // ... (debug prints for model state can remain)
         }
-    }
-    PositionHessianOutput primary_hess_output = compute_position_hessian_components_cuda(
-        model_, visibility_mask_for_model, primary_camera, current_render_output, primary_loss_derivs, num_visible_gaussians_in_model
-    );
+        PositionHessianOutput primary_hess_output = compute_position_hessian_components_cuda(
+            model_,
+            visibility_mask_for_model,
+            primary_camera,
+            current_render_output,
+            primary_loss_derivs.d2L_dc2_diag, // Pass only the d2L/dc2 part
+            num_visible_gaussians_in_model
+        );
 
-    torch::Tensor H_p_total_packed = primary_hess_output.H_p_packed.clone(); // [N_vis_model, 6]
-    torch::Tensor g_p_total_visible = primary_hess_output.grad_p.clone(); // [N_vis_model, 3]
+        torch::Tensor H_p_total_packed = primary_hess_output.H_p_packed.clone(); // [N_vis_model, 6]
+        // Gradient g_p_total_visible now comes from autograd_grad_means
+        torch::Tensor g_p_total_visible = grad_means_visible_autograd.clone(); // [N_vis_model, 3]
 
-    // III. Handle Secondary Targets for Overshoot Prevention
-    if (options_.knn_k > 0 && !knn_secondary_targets_data.empty()) {
+
+    // III. Handle Secondary Targets for Overshoot Prevention (primarily for Hessian accumulation)
+        if (options_.knn_k > 0 && !knn_secondary_targets_data.empty()) {
         for (const auto& knn_data : knn_secondary_targets_data) {
             const Camera* secondary_camera = knn_data.first;
             const torch::Tensor& secondary_gt_image = knn_data.second; // Assumed [H,W,C] on device
@@ -578,27 +576,29 @@ void NewtonOptimizer::step(int iteration,
                 options_.use_l2_for_hessian_L_term // Use same L-term choice
             );
 
-            // 5. Compute Hessian and gradient components for secondary view
-            //    Using primary view's visibility_mask_for_model and num_visible_gaussians_in_model
-            //    as per paper's "sparsely evaluated" idea.
+            // 5. Compute Hessian components for secondary view.
+            //    Gradient g for secondary views will not be used from here, as primary g is from autograd.
+            //    Secondary views primarily contribute to stabilizing the Hessian.
             PositionHessianOutput secondary_hess_output = compute_position_hessian_components_cuda(
                 model_,
                 visibility_mask_for_model, // Re-use primary visibility mask
                 *secondary_camera,
                 secondary_render_output,
-                secondary_loss_derivs,
-                num_visible_gaussians_in_model // Re-use count from primary visibility
+                secondary_loss_derivs.d2L_dc2_diag, // Pass only d2L/dc2 for Hessian
+                num_visible_gaussians_in_model      // Re-use count from primary visibility
             );
 
-            // 6. Accumulate
+            // 6. Accumulate Hessian
             if (secondary_hess_output.H_p_packed.defined() && secondary_hess_output.H_p_packed.numel() > 0) {
                  H_p_total_packed.add_(secondary_hess_output.H_p_packed);
             }
-            if (secondary_hess_output.grad_p.defined() && secondary_hess_output.grad_p.numel() > 0) {
-                g_p_total_visible.add_(secondary_hess_output.grad_p);
-            }
+            // Do NOT accumulate gradient from secondary_hess_output.grad_p as it's removed
+            // and primary gradient comes from autograd.
+            // if (secondary_hess_output.grad_p.defined() && secondary_hess_output.grad_p.numel() > 0) {
+            //    g_p_total_visible.add_(secondary_hess_output.grad_p); // This line is removed.
+            // }
         }
-    }
+        }
 
     // IV. Project Hessian and Gradient to 2D camera plane (U_k^T H U_k, U_k^T g)
     torch::Tensor grad_v_projected = torch::zeros({num_visible_gaussians_in_model, 2}, g_p_total_visible.options());
@@ -613,31 +613,46 @@ void NewtonOptimizer::step(int iteration,
     );
 
     // VII. Update model means
-    if (delta_p.defined() && delta_p.numel() > 0) { // Check if delta_p is valid
-        model_.means().index_add_(0, visible_indices, delta_p);
-    }
+        if (delta_p.defined() && delta_p.numel() > 0) { // Check if delta_p is valid
+            model_.means().index_add_(0, visible_indices, delta_p);
+        }
+    } // End of if (options_.optimize_means)
 
     // === 2. SCALING OPTIMIZATION ===
     if (options_.optimize_scales) {
-        if (options_.debug_print_shapes) std::cout << "[NewtonOpt] Calling compute_scale_updates_newton (Placeholder)..." << std::endl;
+        if (options_.debug_print_shapes) std::cout << "[NewtonOpt] Calling compute_scale_updates_newton..." << std::endl;
+        torch::Tensor grad_scales_raw_visible_autograd = autograd_grad_scales_raw_total.index_select(0, visible_indices);
         AttributeUpdateOutput scale_update = compute_scale_updates_newton(
-            /* model_, */ visible_indices, primary_loss_derivs, primary_camera,
+            visible_indices,
+            grad_scales_raw_visible_autograd,
+            primary_loss_derivs.d2L_dc2_diag, // Pass d2L/dc2 for Hessian
+            primary_camera,
             current_render_output
         );
         if (scale_update.success && scale_update.delta.defined() && scale_update.delta.numel() > 0) {
-            // scale_update.delta is delta_log_s
+            // scale_update.delta is delta_log_s (delta for raw log_scales)
             model_.scaling_raw().index_add_(0, visible_indices, scale_update.delta);
         }
     }
 
     // === 3. ROTATION OPTIMIZATION ===
     if (options_.optimize_rotations) {
-        if (options_.debug_print_shapes) std::cout << "[NewtonOpt] Calling compute_rotation_updates_newton (Placeholder)..." << std::endl;
-         AttributeUpdateOutput rot_update = compute_rotation_updates_newton(
-            visible_indices, primary_loss_derivs, primary_camera,
+        if (options_.debug_print_shapes) std::cout << "[NewtonOpt] Calling compute_rotation_updates_newton..." << std::endl;
+        torch::Tensor grad_rotation_raw_visible_autograd = autograd_grad_rotation_raw_total.index_select(0, visible_indices);
+        // Note: The autograd_grad_rotation_raw is w.r.t. the 4 quaternion components.
+        // The paper's Hessian is for a scalar angle theta_k.
+        // This requires careful handling: either the Hessian kernel is for quaternions,
+        // or the autograd gradient needs to be projected to an angle gradient if H_theta is scalar.
+        // For now, assuming compute_rotation_updates_newton handles this complexity.
+        AttributeUpdateOutput rot_update = compute_rotation_updates_newton(
+            visible_indices,
+            grad_rotation_raw_visible_autograd, // This is grad w.r.t. raw quaternions
+            primary_loss_derivs.d2L_dc2_diag,
+            primary_camera,
             current_render_output
         );
         if (rot_update.success && rot_update.delta.defined() && rot_update.delta.numel() > 0) {
+            // rot_update.delta is expected to be a delta quaternion (e.g., from axis-angle update)
             torch::Tensor q_delta = rot_update.delta; // [N_vis, 4] (w,x,y,z)
             torch::Tensor q_old_visible = model_.rotation_raw().index_select(0, visible_indices).detach(); // [N_vis, 4]
 
@@ -665,13 +680,17 @@ void NewtonOptimizer::step(int iteration,
 
     // === 4. OPACITY OPTIMIZATION ===
     if (options_.optimize_opacities) {
-        if (options_.debug_print_shapes) std::cout << "[NewtonOpt] Calling compute_opacity_updates_newton (Placeholder)..." << std::endl;
+        if (options_.debug_print_shapes) std::cout << "[NewtonOpt] Calling compute_opacity_updates_newton..." << std::endl;
+        torch::Tensor grad_opacity_raw_visible_autograd = autograd_grad_opacity_raw_total.index_select(0, visible_indices);
         AttributeUpdateOutput opacity_update = compute_opacity_updates_newton(
-            visible_indices, primary_loss_derivs, primary_camera,
+            visible_indices,
+            grad_opacity_raw_visible_autograd,
+            primary_loss_derivs.d2L_dc2_diag,
+            primary_camera,
             current_render_output
         );
         if (opacity_update.success && opacity_update.delta.defined() && opacity_update.delta.numel() > 0) {
-            // opacity_update.delta is delta_for_logits
+            // opacity_update.delta is delta_for_logits (delta for raw opacity logits)
             model_.opacity_raw().index_add_(0, visible_indices, opacity_update.delta);
         }
     }
@@ -692,192 +711,183 @@ void NewtonOptimizer::step(int iteration,
 // --- Definitions for Attribute Optimization Stubs ---
 
 NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_scale_updates_newton(
-    /* const SplatData& model_snapshot, */ // model_ is a member
     const torch::Tensor& visible_indices,
-    const LossDerivatives& loss_derivs,
+    const torch::Tensor& autograd_grad_scales_raw_visible, // Gradient for raw log_scales [N_vis, 3]
+    const torch::Tensor& d2L_dc2_diag_pixelwise_for_hessian, // [H, W, 3]
     const Camera& camera,
     const gs::RenderOutput& render_output) {
 
-    if (options_.debug_print_shapes) std::cout << "[NewtonOpt] STUB: compute_scale_updates_newton called for " << visible_indices.numel() << " Gaussians." << std::endl;
+    if (options_.debug_print_shapes) std::cout << "[NewtonOpt] compute_scale_updates_newton for " << visible_indices.numel() << " Gaussians." << std::endl;
 
     if (visible_indices.numel() == 0) {
-        return AttributeUpdateOutput(torch::empty({0}, model_.get_scaling().options()), true); // Success, but no work
+        return AttributeUpdateOutput(torch::empty({0}, model_.scaling_raw().options()), true); // Success, but no work
     }
 
-    // --- Get necessary data ---
-    const torch::Tensor current_scales_for_opt = model_.get_scaling().index_select(0, visible_indices).detach(); // Renamed
-    const torch::Tensor current_rotations = model_.get_rotation().index_select(0, visible_indices).detach();
-    const torch::Tensor current_means = model_.get_means().index_select(0, visible_indices).detach();
-    // Other model params like opacity, SHs might be needed if ∂c/∂s_k depends on them for full color C.
-
     int num_vis_gaussians = static_cast<int>(visible_indices.numel());
-    auto tensor_opts_float = current_scales_for_opt.options(); // Use renamed variable
+    auto tensor_opts_float = model_.scaling_raw().options(); // Ensure options from a valid tensor
 
-    // --- Placeholder outputs from conceptual CUDA kernels ---
-    // H_s_k : [num_vis_gaussians, 6] (for 3x3 symmetric Hessian of scales)
-    // g_s_k : [num_vis_gaussians, 3] (gradient w.r.t. scales)
+    // --- Compute Hessian H_s for log_scales ---
     torch::Tensor H_s_packed = torch::zeros({num_vis_gaussians, 6}, tensor_opts_float);
-    torch::Tensor g_s = torch::zeros({num_vis_gaussians, 3}, tensor_opts_float);
 
-    // Conceptual kernel call to compute per-Gaussian Hessian (H_s_k) and gradient (g_s_k) for scales.
-    // This involves calculating derivatives like ∂c/∂s_k and ∂²c/∂s_k², then summing over pixels
-    // using loss derivatives (dL/dc, d²L/dc²) to form H_s_k and g_s_k.
-    /*
-    NewtonKernels::compute_scale_hessian_gradient_components_kernel_launcher(
-        render_output.height, render_output.width, static_cast<int>(render_output.image.size(-1)), // C_img
-        model_, // Pass relevant parts of model or specific tensors
-        visible_indices,
-        view_mat_tensor, // Need view_mat from primary_camera
-        K_matrix,        // Need K from primary_camera
-        cam_pos_world,   // Need cam_pos from primary_camera
-        render_output,   // For tile iterators, etc.
-        loss_derivs.dL_dc,
-        loss_derivs.d2L_dc2_diag,
-        H_s_packed, // Output
-        g_s         // Output
+    // These tensors are needed by the kernel, get them on the correct device
+    auto dev = model_.get_means().device();
+    torch::Tensor view_mat_tensor = camera.world_view_transform().to(dev).contiguous();
+    torch::Tensor K_matrix_tensor = camera.K().to(dev).contiguous();
+    torch::Tensor cam_pos_world_tensor = camera.camera_center().to(dev).contiguous();
+
+
+    NewtonKernels::compute_scale_hessian_components_kernel_launcher(
+        render_output.height, render_output.width, static_cast<int>(d2L_dc2_diag_pixelwise_for_hessian.size(-1)), // C_img
+        static_cast<int>(model_.size()), // P_total
+        model_.get_means(),         // Pass full model means
+        model_.scaling_raw(),       // Pass full model raw log_scales
+        model_.get_rotation(),      // Pass full model rotations (quats)
+        model_.opacity_raw(),       // Pass full model raw opacities (logits)
+        model_.get_shs(),           // Pass full model SHs
+        model_.get_active_sh_degree(),
+        view_mat_tensor,
+        K_matrix_tensor,
+        cam_pos_world_tensor,
+        render_output,
+        visible_indices,            // Pass only indices of visible Gaussians
+        d2L_dc2_diag_pixelwise_for_hessian,
+        H_s_packed                  // Output Hessian for visible Gaussians
     );
-    */
-    // For now, H_s_packed and g_s are zeros.
+    // H_s_packed is currently filled with zeros by the placeholder kernel.
 
-    // Paper mentions projection to eigenvalue space (lambda_min, lambda_max) for robustness.
-    // Σ_k = V_k Λ_k V_kᵀ ; E_2ᵀ : (V_k J_k W_k R_k) : E_3 s_k = λ_k
-    // This implies a transformation T_k such that Δs_k = T_k' Δλ_k or similar.
-    // And g_λ = T_kᵀ g_s, H_λ = T_kᵀ H_s T_k.
-    // This is a change of variables for the optimization.
-    // For this structural stub, we'll proceed as if solving directly for Δs_k.
-    // A full implementation would need the projection logic.
+    // --- Solve the linear system H_s * delta_log_s = -g_s (autograd_grad_scales_raw_visible) ---
+    torch::Tensor delta_log_s = torch::zeros_like(autograd_grad_scales_raw_visible);
 
-    // --- Solve the linear system H_s * Δs = -g_s ---
-    // This would be a batch 3x3 solve for each Gaussian.
-    // For simplicity, placeholder for delta_s (actual solve needed).
-    torch::Tensor delta_s = torch::zeros_like(g_s); // This will be delta_log_s
-
-    // The compute_scale_hessian_gradient_components_kernel_launcher is a stub and will leave H_s_packed and g_s as zeros.
-    // So, delta_s will also be zeros after the solve.
-    // The call to the solver:
     if (num_vis_gaussians > 0) {
          NewtonKernels::batch_solve_3x3_system_kernel_launcher(
             num_vis_gaussians,
-            H_s_packed, // Placeholder, currently zeros
-            g_s,        // Placeholder, currently zeros
+            H_s_packed, // Hessian computed by our new (placeholder) kernel
+            autograd_grad_scales_raw_visible, // Gradient from autograd
             static_cast<float>(options_.damping),
-            delta_s     // Output: delta_log_s
+            delta_log_s     // Output: delta_log_s
         );
-        delta_s.mul_(options_.step_scale); // Apply step scale: delta_log_s *= step_scale
-                                           // Note: The solver gives x = -(H+dI)^-1 g.
-                                           // If we want delta = -step * (H+dI)^-1 g, then multiply by step_scale here.
-                                           // The 2x2 solver had step_scale inside. This 3x3 does not.
-        delta_s.nan_to_num_(0.0, 0.0, 0.0);
+        // The solver already does H_inv * (-g), so we multiply by step_scale here.
+        // Or, more accurately, the solver computes x = (H+dI)^-1 (-g)
+        // We want delta = step_scale * x
+        delta_log_s.mul_(-options_.step_scale); // Correct: solver gives (H+dI)^-1(g), we want -step * (H+dI)^-1(g) if g is dL/dx.
+                                               // If g is -dL/dx, then delta = step_scale * (H+dI)^-1(g).
+                                               // Autograd provides dL/dx. So g = dL/dx. We want dx = -step * H_inv * g.
+                                               // batch_solve_3x3 outputs (H+dI)^-1(-g). So if g_s is dL/dx, output is (H+dI)^-1(-dL/dx).
+                                               // We then multiply by step_scale.
+                                               // So, delta_log_s = step_scale * (H+dI)^-1 (-autograd_grad_scales_raw_visible)
+                                               // The solver calculates x for Ax=b. Here A=H, b=-g. So x = H^-1(-g).
+                                               // Then delta = step_scale * x.
+                                               // The batch_solve_3x3_system_kernel appears to solve Hx = -g.
+                                               // So, the output `delta_log_s` is already -(H+dI)^-1 g.
+                                               // We just need to scale it.
+        // Re-evaluating the batch_solve_3x3_symmetric_system_kernel:
+        // xp[0]=invDetA*((a11*a22-a12*a21)*(-gp[0]) + ... )
+        // This means it solves H * xp = -gp. So xp = -H_inv * gp.
+        // If gp is autograd_grad (dL/dx_raw), then xp = -H_inv * (dL/dx_raw).
+        // We want to apply update: x_new = x_old - step_scale * H_inv * (dL/dx_raw)
+        // So, the update is step_scale * xp.
+        delta_log_s.mul_(options_.step_scale);
+
+
+        delta_log_s.nan_to_num_(0.0, 0.0, 0.0);
     }
 
-
-    // Assuming delta_s is delta_log_s, it can be directly applied to model_._scaling_
-    // The actual update happens in NewtonOptimizer::step using model_.get_raw_scaling().index_add_
-    // or model_._scaling_.index_add_
-    return AttributeUpdateOutput(delta_s, true);
+    return AttributeUpdateOutput(delta_log_s, true);
 }
 
 NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_rotation_updates_newton(
     const torch::Tensor& visible_indices,
-    const LossDerivatives& loss_derivs,
+    const torch::Tensor& autograd_grad_rotation_raw_visible, // Grad w.r.t raw quaternions [N_vis, 4]
+    const torch::Tensor& d2L_dc2_diag_pixelwise_for_hessian,
     const Camera& camera,
     const gs::RenderOutput& render_output) {
 
-    if (options_.debug_print_shapes) std::cout << "[NewtonOpt] STUB: compute_rotation_updates_newton called for " << visible_indices.numel() << " Gaussians." << std::endl;
+    if (options_.debug_print_shapes) std::cout << "[NewtonOpt] compute_rotation_updates_newton for " << visible_indices.numel() << " Gaussians." << std::endl;
 
     if (visible_indices.numel() == 0) {
-        return AttributeUpdateOutput(torch::empty({0}, model_.get_rotation().options().dtype(torch::kFloat).device(model_.get_rotation().device())), true); // Return empty delta if no visible gaussians
+        return AttributeUpdateOutput(torch::empty({0}, model_.rotation_raw().options()), true);
     }
-
-    // --- Get necessary data ---
-    const torch::Tensor current_rotations_quat = model_.get_rotation().index_select(0, visible_indices).detach(); // [N_vis, 4]
-    const torch::Tensor current_means = model_.get_means().index_select(0, visible_indices).detach(); // Needed for r_k
-    // Other model params (scales, opacity, SHs) might be needed for full ∂c/∂θ_k
 
     int num_vis_gaussians = static_cast<int>(visible_indices.numel());
-    auto tensor_opts_float = current_rotations_quat.options(); // Should be float
+    auto tensor_opts_float = model_.rotation_raw().options();
+    auto dev = model_.get_means().device();
 
-    // Paper parameterizes rotation by an angle θ_k around axis r_k (view vector)
-    // r_k = p_k - C_w (world space vector from camera center to Gaussian mean)
-    // This r_k needs to be computed for each visible Gaussian.
-    // cam_pos_world can be obtained similarly to how it's done in position optimization.
-    torch::Tensor view_mat_tensor = camera.world_view_transform().to(tensor_opts_float.device()).contiguous();
-    torch::Tensor view_mat_2d = view_mat_tensor.select(0,0);
-    torch::Tensor R_wc_2d = view_mat_2d.slice(0,0,3).slice(1,0,3);
-    torch::Tensor t_wc_2d = view_mat_2d.slice(0,0,3).slice(1,3,4);
-    torch::Tensor cam_pos_world = -torch::matmul(R_wc_2d.t(), t_wc_2d).squeeze(); // [3]
+    // --- Compute r_k_vecs (view vectors to Gaussians, used as rotation axes) ---
+    const torch::Tensor current_means_visible = model_.get_means().index_select(0, visible_indices).detach();
+    torch::Tensor cam_pos_world_tensor = camera.camera_center().to(dev).contiguous();
+    torch::Tensor r_k_vecs = current_means_visible - cam_pos_world_tensor.unsqueeze(0); // [N_vis, 3]
 
-    torch::Tensor r_k_vecs = current_means - cam_pos_world.unsqueeze(0); // [N_vis, 3]
-    // r_k should be normalized, but paper might use unnormalized in some places for axis.
-    // The axis for Δq_k is r_k (normalized).
-
-    // --- Placeholder outputs from conceptual CUDA kernels ---
-    // H_theta_k : [num_vis_gaussians, 1] (scalar Hessian for angle theta_k)
-    // g_theta_k : [num_vis_gaussians, 1] (scalar gradient w.r.t. theta_k)
+    // --- Compute Hessian H_theta for rotation angle theta_k ---
+    // H_theta is scalar per Gaussian [N_vis, 1]
     torch::Tensor H_theta = torch::zeros({num_vis_gaussians, 1}, tensor_opts_float);
-    torch::Tensor g_theta = torch::zeros({num_vis_gaussians, 1}, tensor_opts_float);
 
-    // Conceptual kernel call to compute per-Gaussian Hessian (H_theta_k) and gradient (g_theta_k)
-    // for rotation angle theta_k around axis r_k. Involves derivatives like ∂c/∂θ_k.
-    /*
-    NewtonKernels::compute_rotation_hessian_gradient_components_kernel_launcher(
-        render_output.height, render_output.width, static_cast<int>(render_output.image.size(-1)),
-        model_, // or specific tensors: means, scales, rotations, opacities, shs
-        visible_indices,
-        r_k_vecs, // Axis of rotation for each Gaussian
-        primary_camera, // For full view, projection matrices if needed by ∂Σ_k/∂θ_k
+    torch::Tensor view_mat_tensor = camera.world_view_transform().to(dev).contiguous();
+    torch::Tensor K_matrix_tensor = camera.K().to(dev).contiguous();
+
+    NewtonKernels::compute_rotation_hessian_components_kernel_launcher(
+        render_output.height, render_output.width, static_cast<int>(d2L_dc2_diag_pixelwise_for_hessian.size(-1)),
+        static_cast<int>(model_.size()), // P_total
+        model_.get_means(),
+        model_.scaling_raw(),
+        model_.rotation_raw(),
+        model_.opacity_raw(),
+        model_.get_shs(),
+        model_.get_active_sh_degree(),
+        view_mat_tensor,
+        K_matrix_tensor,
+        cam_pos_world_tensor,
+        r_k_vecs, // Pass r_k_vecs for visible Gaussians
         render_output,
-        loss_derivs.dL_dc,
-        loss_derivs.d2L_dc2_diag,
-        H_theta, // Output
-        g_theta  // Output
+        visible_indices,
+        d2L_dc2_diag_pixelwise_for_hessian,
+        H_theta // Output Hessian
     );
-    */
-    // For now, H_theta and g_theta are zeros.
+    // H_theta is currently filled with zeros by the placeholder kernel.
 
-    // --- Solve the linear system H_theta * Δtheta = -g_theta ---
-    // This is a batch 1x1 solve: Δtheta = -g_theta / H_theta
-    torch::Tensor delta_theta = torch::zeros_like(g_theta);
-    if (g_theta.numel() > 0) {
-        // Conceptual:
-        // delta_theta = NewtonKernels::batch_solve_1x1_system_kernel_launcher(H_theta, g_theta, options_.damping);
-        // delta_theta = -options_.step_scale * delta_theta; // Apply step scale
+    // --- Gradient for angle theta_k ---
+    // This is the tricky part: autograd_grad_rotation_raw_visible is dL/dq (quaternion).
+    // If H_theta is for an angle, we need dL/d_theta.
+    // dL/d_theta = (dL/dq) * (dq/d_theta).
+    // dq/d_theta for q = [cos(theta/2), sin(theta/2)*axis] is non-trivial.
+    // For now, as a placeholder, if H_theta is scalar, g_theta must also be scalar.
+    // Let's use the norm of the xyz part of dL/dq as a proxy for g_theta (VERY ROUGH APPROXIMATION).
+    // This part needs proper derivation based on the chosen rotation parameterization for H.
+    torch::Tensor g_theta_proxy = torch::norm(autograd_grad_rotation_raw_visible.slice(1, 1, 4), /*p=*/2, /*dim=*/1, /*keepdim=*/true);
+    // Ensure g_theta_proxy has same device and dtype as H_theta for the solver
+    g_theta_proxy = g_theta_proxy.to(H_theta.options());
 
-        // Placeholder: simplified update (e.g., gradient descent on theta for testing)
-        // This is NOT the Newton step.
-        // H_theta would need to be regularized (H_theta + damping).
-        // delta_theta = -options_.step_scale * g_theta / (H_theta.abs().clamp_min(1e-6) + options_.damping);
-        delta_theta = -options_.step_scale * g_theta * 0.01; // Small learning rate for placeholder
-    }
 
-    // The H_theta and g_theta are currently zeros due to stubbed kernel.
-    // So delta_theta will also be zeros.
+    // --- Solve the linear system H_theta * delta_theta = -g_theta_proxy ---
+    torch::Tensor delta_theta = torch::zeros_like(g_theta_proxy); // Should be [N_vis, 1]
+
     if (num_vis_gaussians > 0) {
         NewtonKernels::batch_solve_1x1_system_kernel_launcher(
             num_vis_gaussians,
-            H_theta, // Placeholder, currently zeros
-            g_theta, // Placeholder, currently zeros
+            H_theta,
+            g_theta_proxy, // Using proxy gradient
             static_cast<float>(options_.damping),
-            delta_theta
+            delta_theta // Output
         );
-        delta_theta.mul_(options_.step_scale); // delta_theta *= step_scale
+        // batch_solve_1x1 already computes -g/H. We need to scale by step_scale.
+        // The solver output is x for Hx = -g. So x = -H_inv * g.
+        // We want update = step_scale * x.
+        delta_theta.mul_(options_.step_scale);
         delta_theta.nan_to_num_(0.0, 0.0, 0.0);
     }
 
-    // Convert delta_theta (angles) and r_k_vecs (axes) to delta quaternions
-    // delta_q_k = [cos(angle/2), sin(angle/2) * axis_normalized]
-    // r_k_vecs is [N_vis, 3], delta_theta is [N_vis, 1] or [N_vis]
-
-    torch::Tensor delta_quats = torch::zeros({num_vis_gaussians, 4}, tensor_opts_float); // Output: [N_vis, 4]
+    // --- Convert delta_theta (angles) and r_k_vecs (axes) to delta quaternions ---
+    torch::Tensor delta_quats = torch::zeros({num_vis_gaussians, 4}, tensor_opts_float);
 
     if (num_vis_gaussians > 0) {
         torch::Tensor r_k_normalized = torch::nn::functional::normalize(r_k_vecs, torch::nn::functional::NormalizeFuncOptions().dim(1).eps(1e-9));
-        torch::Tensor half_angles = delta_theta.squeeze(-1) * 0.5f; // Ensure delta_theta is [N_vis] if it was [N_vis,1]
+        // Ensure delta_theta is [N_vis] before operations if it's [N_vis, 1]
+        torch::Tensor half_angles = delta_theta.squeeze(-1) * 0.5f;
         torch::Tensor cos_half_angles = torch::cos(half_angles);
         torch::Tensor sin_half_angles = torch::sin(half_angles);
 
         delta_quats.select(1, 0) = cos_half_angles; // w component
         delta_quats.slice(1, 1, 4) = r_k_normalized * sin_half_angles.unsqueeze(-1); // xyz components
+        delta_quats = torch::nn::functional::normalize(delta_quats, torch::nn::functional::NormalizeFuncOptions().dim(1).eps(1e-9));
     }
 
     return AttributeUpdateOutput(delta_quats, true);
@@ -885,111 +895,89 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_rotation_updates
 
 NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_opacity_updates_newton(
     const torch::Tensor& visible_indices,
-    const LossDerivatives& loss_derivs,
+    const torch::Tensor& autograd_grad_opacity_raw_visible, // Grad w.r.t. raw logits [N_vis, 1]
+    const torch::Tensor& d2L_dc2_diag_pixelwise_for_hessian,
     const Camera& camera,
     const gs::RenderOutput& render_output) {
 
-    if (options_.debug_print_shapes) std::cout << "[NewtonOpt] STUB: compute_opacity_updates_newton called for " << visible_indices.numel() << " Gaussians." << std::endl;
+    if (options_.debug_print_shapes) std::cout << "[NewtonOpt] compute_opacity_updates_newton for " << visible_indices.numel() << " Gaussians." << std::endl;
 
     if (visible_indices.numel() == 0) {
-        return AttributeUpdateOutput(torch::empty({0}, model_.get_opacity().options()), true);
+        return AttributeUpdateOutput(torch::empty({0}, model_.opacity_raw().options()), true);
     }
-
-    // --- Get necessary data & parameters ---
-    // Note: get_opacity() applies sigmoid. For barrier terms, we need raw σ_k in (0,1).
-    // The paper's barrier derivatives are in terms of σ_k, not logit(σ_k).
-    // We should use the direct output of get_opacity() which is already sigmoided.
-    const torch::Tensor current_opacities_sigma = model_.get_opacity().index_select(0, visible_indices).detach(); // [N_vis] (already in range [0,1])
 
     int num_vis_gaussians = static_cast<int>(visible_indices.numel());
-    auto tensor_opts_float = current_opacities_sigma.options();
-    auto device = current_opacities_sigma.device();
+    auto tensor_opts_float = model_.opacity_raw().options();
+    auto dev = model_.get_means().device();
 
-    // Barrier parameters (alpha_sigma from paper, though paper's derivatives don't show it explicitly)
-    // Assuming opt_params_ref_.log_barrier_alpha_opacity is the alpha_sigma.
-    // If the paper's given derivatives for barrier already include alpha, then we don't multiply again.
-    // The paper states: "Hessian and gradient w.r.t. L^t should also incorporate barrier loss i.e., -1/σ_k - 1/(1-σ_k) and 1/(1-σ_k)^2 - 1/σ_k^2."
-    // This implies these ARE the additions to g_L and H_L respectively.
-    float alpha_sigma = 1.0f; // Default if not in params, or assume it's baked into paper's derivative forms.
-    // Example: if (opt_params_ref_.defined_log_barrier_alpha_opacity) alpha_sigma = opt_params_ref_.log_barrier_alpha_opacity;
+    // --- Compute base Hessian H_opacity_base for opacity logits ---
+    // H_opacity_base is scalar per Gaussian [N_vis] or [N_vis, 1]
+    torch::Tensor H_opacity_base = torch::zeros({num_vis_gaussians}, tensor_opts_float);
+                                            // Make it [N_vis] for 1x1 solver compatibility
 
+    torch::Tensor view_mat_tensor = camera.world_view_transform().to(dev).contiguous();
+    torch::Tensor K_matrix_tensor = camera.K().to(dev).contiguous();
+    torch::Tensor cam_pos_world_tensor = camera.camera_center().to(dev).contiguous();
 
-    // --- Calculate derivatives of Log Barrier terms ---
-    // Ensure opacities are clamped slightly away from 0 and 1 for barrier stability
-    torch::Tensor sigma_k = current_opacities_sigma.clamp(1e-7f, 1.0f - 1e-7f);
-    torch::Tensor g_barrier = -(1.0f / sigma_k + 1.0f / (1.0f - sigma_k)); // Paper's g_barrier term [N_vis]
-    torch::Tensor H_barrier = 1.0f / torch::pow(1.0f - sigma_k, 2) - 1.0f / torch::pow(sigma_k, 2); // Paper's H_barrier term [N_vis]
-    // If alpha_sigma is a separate multiplier for the barrier *loss term itself*:
-    // g_barrier *= alpha_sigma; H_barrier *= alpha_sigma; // (This depends on precise definition)
-
-    // --- Placeholder for base Hessian and Gradient from color terms ---
-    // H_sigma_base_k : [num_vis_gaussians] (scalar Hessian for opacity sigma_k from color rendering)
-    // g_sigma_base_k : [num_vis_gaussians] (scalar gradient w.r.t. sigma_k from color rendering)
-    torch::Tensor H_sigma_base = torch::zeros({num_vis_gaussians}, tensor_opts_float);
-    torch::Tensor g_sigma_base = torch::zeros({num_vis_gaussians}, tensor_opts_float);
-
-    // Conceptual CUDA kernel calls:
-    // 1. Compute dc_dopacity = ∂c/∂σ_k. Paper: ∂c/∂σ_k = G_k (Π(1-α_j)) (c_gauss_k - C_contrib_behind).
-    //    Paper states ∂²c/∂σ_k² = 0, simplifying H_sigma_base.
-    /*
-    torch::Tensor dc_dopacity_packed; // Placeholder for complex derivative output
-    NewtonKernels::compute_dc_dopacity_kernel_launcher(
-        model_, visible_indices, camera, render_output, dc_dopacity_packed);
-    */
-
-    // 2. Accumulate H_sigma_base and g_sigma_base using dc_dopacity and loss derivatives.
-    //    g_sigma_base_k = sum_pixels [ (∂c/∂σ_k)ᵀ ⋅ (dL/dc) ]
-    //    H_sigma_base_k = sum_pixels [ (∂c/∂σ_k)ᵀ ⋅ (d²L/dc²) ⋅ (∂c/∂σ_k) ]
-    /*
-    NewtonKernels::accumulate_opacity_hessian_gradient_kernel_launcher( // This kernel is not defined yet
-        dc_dopacity_packed,
-        loss_derivs.dL_dc,
-        loss_derivs.d2L_dc2_diag,
-        render_output, // For pixel mapping if needed
-        H_sigma_base, // Output
-        g_sigma_base  // Output
+    NewtonKernels::compute_opacity_hessian_components_kernel_launcher(
+        render_output.height, render_output.width, static_cast<int>(d2L_dc2_diag_pixelwise_for_hessian.size(-1)),
+        static_cast<int>(model_.size()), // P_total
+        model_.get_means(),
+        model_.scaling_raw(),
+        model_.rotation_raw(),
+        model_.opacity_raw(), // Pass raw logits
+        model_.get_shs(),
+        model_.get_active_sh_degree(),
+        view_mat_tensor,
+        K_matrix_tensor,
+        cam_pos_world_tensor,
+        render_output,
+        visible_indices,
+        d2L_dc2_diag_pixelwise_for_hessian,
+        H_opacity_base // Output Hessian base term
     );
-    */
-    // For now, H_sigma_base and g_sigma_base are zeros from initialization.
+    // H_opacity_base is currently filled with zeros by the placeholder kernel.
 
-    // --- Combine with barrier terms ---
-    torch::Tensor H_sigma_total = H_sigma_base + H_barrier; // [N_vis]
-    torch::Tensor g_sigma_total = g_sigma_base + g_barrier; // [N_vis]
+    // --- Add Barrier Term to Hessian ---
+    // Barrier terms are typically for the value after activation (sigma in (0,1)), not logits.
+    // The paper states: "Hessian and gradient w.r.t. L^t should also incorporate barrier loss i.e., -1/σ_k - 1/(1-σ_k) and 1/(1-σ_k)^2 - 1/σ_k^2."
+    // These additions are to g_L_sigma and H_L_sigma.
+    // If we optimize logits, the barrier must be transformed or applied differently.
+    // For now, let's assume the barrier is handled by the gradient `autograd_grad_opacity_raw_visible` if it includes a barrier loss term,
+    // or we add the barrier to H_opacity_base *after* transforming H_opacity_base to be H_sigma_base.
+    // This part is complex. The paper's Hessian is likely d2(L+L_barrier)/d(logit)^2.
+    // A simpler approach for now: use H_opacity_base as is, and assume barrier loss is part of autograd_grad.
+    torch::Tensor H_opacity_total = H_opacity_base; // Placeholder: No explicit barrier added to Hessian here yet.
+                                                 // This needs careful derivation if H is for logits and barrier for sigma.
 
-    // --- Solve the linear system H_sigma * Δsigma = -g_sigma ---
-    // Δsigma = -g_sigma / (H_sigma_total + damping)
-    torch::Tensor delta_sigma = torch::zeros_like(g_sigma_total);
-    if (g_sigma_total.numel() > 0) {
-        delta_sigma = -g_sigma_total / (H_sigma_total + options_.damping); // Element-wise
-        delta_sigma = options_.step_scale * delta_sigma; // Apply step scale
-        // NaN/inf guard
-        delta_sigma.nan_to_num_(0.0, 0.0, 0.0);
+    // --- Solve the linear system H_opacity_logit * delta_logit = -g_logit ---
+    // autograd_grad_opacity_raw_visible is dL/d_logit.
+    torch::Tensor delta_logits = torch::zeros_like(autograd_grad_opacity_raw_visible);
+
+    if (num_vis_gaussians > 0) {
+        // Ensure g_opacity is [N_vis] if H_opacity_total is [N_vis] for 1x1 solver
+        torch::Tensor g_opacity_for_solver = autograd_grad_opacity_raw_visible.squeeze(-1);
+        if (g_opacity_for_solver.dim() == 0 && num_vis_gaussians == 1) { // Handle case of single element
+             g_opacity_for_solver = g_opacity_for_solver.unsqueeze(0);
+        }
+
+
+        NewtonKernels::batch_solve_1x1_system_kernel_launcher(
+            num_vis_gaussians,
+            H_opacity_total, // Hessian for logits
+            g_opacity_for_solver, // Gradient for logits
+            static_cast<float>(options_.damping),
+            delta_logits.squeeze(-1) // Output delta for logits (ensure it's [N_vis])
+        );
+        // batch_solve_1x1 output is -H_inv * g. We want step_scale * (-H_inv * g).
+        delta_logits.mul_(options_.step_scale);
+        delta_logits.nan_to_num_(0.0, 0.0, 0.0);
+        if (delta_logits.dim() == 1) { // Ensure it's [N_vis, 1] for update
+            delta_logits = delta_logits.unsqueeze(-1);
+        }
     }
 
-    // The delta_sigma is an update to sigma_k (value in (0,1)) directly.
-    // The barrier terms in H and g are meant to keep sigma_k within (0,1) during the solve.
-
-    // Since model_.get_opacity() returns sigmoided values, but stores logits,
-    // we need to convert the update delta_sigma (which is for sigma in (0,1))
-    // to an update for the logits.
-    // new_sigma = current_opacities_sigma + delta_sigma
-    // new_logit = logit(new_sigma)
-    // delta_for_logits = new_logit - current_logits
-    // current_logits can be obtained by model_.get_raw_opacity().index_select(0, visible_indices)
-
-    torch::Tensor current_logits = model_.opacity_raw().index_select(0, visible_indices).detach();
-    torch::Tensor updated_sigma = current_opacities_sigma + delta_sigma;
-
-    // Clamp updated_sigma to prevent issues with logit function (input must be in (0,1))
-    updated_sigma.clamp_(1e-7f, 1.0f - 1e-7f);
-
-    torch::Tensor updated_logits = torch::logit(updated_sigma, /*eps=*/1e-7f); // Use eps for stability if not already clamped well
-
-    // The actual delta to be applied to the stored logits
-    torch::Tensor delta_for_logits = updated_logits - current_logits;
-    delta_for_logits.nan_to_num_(0.0, 0.0, 0.0); // Final safety for NaNs
-
-    return AttributeUpdateOutput(delta_for_logits, true);
+    return AttributeUpdateOutput(delta_logits, true);
 }
 
 NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_sh_updates_newton(

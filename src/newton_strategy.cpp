@@ -91,6 +91,51 @@ void NewtonStrategy::post_backward(int iter, gs::RenderOutput& render_output) {
     // This is where the 'ranks' tensor from gsplat projection would be essential.
     // Since RenderOutput doesn't expose it, this will be a placeholder.
     compute_visibility_mask_for_model(render_output, *splat_data_);
+
+    // Capture gradients from autograd
+    // Ensure that tensors exist and have gradients. Clone to be safe.
+    if (splat_data_->means().grad().defined()) {
+        autograd_grad_means_ = splat_data_->means().grad().clone();
+    } else {
+        // Create a zero tensor of the same shape if grad is not defined.
+        // This might happen if a parameter isn't part of the computation graph leading to the loss.
+        std::cerr << "Warning: NewtonStrategy::post_backward - splat_data_->means().grad() is not defined. Using zeros." << std::endl;
+        autograd_grad_means_ = torch::zeros_like(splat_data_->means());
+    }
+
+    // TODO: Capture gradients for other parameters (scales, rotations, opacities, shs)
+    // For now, creating zero tensors as placeholders if they are needed by NewtonOptimizer::step
+    // This assumes NewtonOptimizer::step will be modified to take all these grads.
+    // If a parameter is not optimized by Newton, its grad might not be needed.
+    if (optim_params_cache_.newton_optimize_scales && splat_data_->scaling_raw().grad().defined()) {
+         autograd_grad_scales_raw_ = splat_data_->scaling_raw().grad().clone();
+    } else if (optim_params_cache_.newton_optimize_scales) {
+        std::cerr << "Warning: NewtonStrategy::post_backward - splat_data_->scaling_raw().grad() is not defined while newton_optimize_scales is true. Using zeros." << std::endl;
+        autograd_grad_scales_raw_ = torch::zeros_like(splat_data_->scaling_raw());
+    }
+
+    if (optim_params_cache_.newton_optimize_rotations && splat_data_->rotation_raw().grad().defined()) {
+        autograd_grad_rotation_raw_ = splat_data_->rotation_raw().grad().clone();
+    } else if (optim_params_cache_.newton_optimize_rotations) {
+        std::cerr << "Warning: NewtonStrategy::post_backward - splat_data_->rotation_raw().grad() is not defined while newton_optimize_rotations is true. Using zeros." << std::endl;
+        autograd_grad_rotation_raw_ = torch::zeros_like(splat_data_->rotation_raw());
+    }
+
+    if (optim_params_cache_.newton_optimize_opacities && splat_data_->opacity_raw().grad().defined()) {
+        autograd_grad_opacity_raw_ = splat_data_->opacity_raw().grad().clone();
+    } else if (optim_params_cache_.newton_optimize_opacities) {
+        std::cerr << "Warning: NewtonStrategy::post_backward - splat_data_->opacity_raw().grad() is not defined while newton_optimize_opacities is true. Using zeros." << std::endl;
+        autograd_grad_opacity_raw_ = torch::zeros_like(splat_data_->opacity_raw());
+    }
+
+    if (optim_params_cache_.newton_optimize_shs && splat_data_->sh0().grad().defined() && splat_data_->shN().grad().defined()) {
+        autograd_grad_sh0_ = splat_data_->sh0().grad().clone();
+        autograd_grad_shN_ = splat_data_->shN().grad().clone();
+    } else if (optim_params_cache_.newton_optimize_shs) {
+         std::cerr << "Warning: NewtonStrategy::post_backward - SH grads not defined while newton_optimize_shs is true. Using zeros." << std::endl;
+        if (!autograd_grad_sh0_.defined() || autograd_grad_sh0_.numel() == 0) autograd_grad_sh0_ = torch::zeros_like(splat_data_->sh0());
+        if (!autograd_grad_shN_.defined() || autograd_grad_shN_.numel() == 0) autograd_grad_shN_ = torch::zeros_like(splat_data_->shN());
+    }
 }
 
 void NewtonStrategy::step(int iter) {
@@ -103,13 +148,34 @@ void NewtonStrategy::step(int iter) {
         return;
     }
 
+    // Ensure autograd_grad_means_ is defined before passing
+    if (!autograd_grad_means_.defined()) {
+        TORCH_CHECK(false, "NewtonStrategy::step - autograd_grad_means_ is not defined. Ensure post_backward was called after loss.backward().");
+        // Or, alternatively, provide a zero tensor if this case should be handled gracefully,
+        // though it indicates a logical error in the training loop.
+        // autograd_grad_means_ = torch::zeros_like(splat_data_->means());
+    }
+    // Ensure all necessary autograd gradients are defined before passing
+    TORCH_CHECK(autograd_grad_means_.defined(), "NewtonStrategy::step - autograd_grad_means_ is not defined.");
+    TORCH_CHECK(autograd_grad_scales_raw_.defined(), "NewtonStrategy::step - autograd_grad_scales_raw_ is not defined.");
+    TORCH_CHECK(autograd_grad_rotation_raw_.defined(), "NewtonStrategy::step - autograd_grad_rotation_raw_ is not defined.");
+    TORCH_CHECK(autograd_grad_opacity_raw_.defined(), "NewtonStrategy::step - autograd_grad_opacity_raw_ is not defined.");
+    TORCH_CHECK(autograd_grad_sh0_.defined(), "NewtonStrategy::step - autograd_grad_sh0_ is not defined.");
+    TORCH_CHECK(autograd_grad_shN_.defined(), "NewtonStrategy::step - autograd_grad_shN_ is not defined.");
+
     optimizer_->step(
         iter,
-        current_visibility_mask_for_model_, // This needs to be correctly computed
+        current_visibility_mask_for_model_,
+        autograd_grad_means_,
+        autograd_grad_scales_raw_,
+        autograd_grad_rotation_raw_,
+        autograd_grad_opacity_raw_,
+        autograd_grad_sh0_,
+        autograd_grad_shN_,
         current_render_output_cache_,
         *current_primary_camera_,
         current_primary_gt_image_,
-        current_knn_targets_gpu_ // KNN data (cameras and their GT images on GPU)
+        current_knn_targets_gpu_
     );
 }
 

@@ -43,10 +43,16 @@ public:
                     Options options = {});
 
     void step(int iteration,
-              const torch::Tensor& visibility_mask, // Mask for model_.means()
-              const gs::RenderOutput& current_render_output, // from primary target
+              const torch::Tensor& visibility_mask_for_model, // Boolean mask for model_.means() [N_total]
+              const torch::Tensor& autograd_grad_means_total,       // [N_total, 3]
+              const torch::Tensor& autograd_grad_scales_raw_total,  // [N_total, 3]
+              const torch::Tensor& autograd_grad_rotation_raw_total, // [N_total, 4]
+              const torch::Tensor& autograd_grad_opacity_raw_total, // [N_total, 1]
+              const torch::Tensor& autograd_grad_sh0_total,         // [N_total, 1, 3]
+              const torch::Tensor& autograd_grad_shN_total,         // [N_total, K-1, 3]
+              const gs::RenderOutput& current_render_output,
               const Camera& primary_camera,
-              const torch::Tensor& primary_gt_image, // Already on device
+              const torch::Tensor& primary_gt_image,
               const std::vector<std::pair<const Camera*, torch::Tensor>>& knn_secondary_targets_data
               );
 
@@ -71,19 +77,19 @@ private:
     // --- Position (Means) ---
     struct PositionHessianOutput {
         torch::Tensor H_p_packed; // Packed symmetric 3x3 Hessian per Gaussian [N_vis, 6]
-        torch::Tensor grad_p;     // Gradient 𝜕L/𝜕p per Gaussian [N_vis, 3]
+        // grad_p is removed, it will come from autograd_grad_means passed to step()
     };
+    // Computes only the Hessian components for position. Gradient comes from autograd.
     PositionHessianOutput compute_position_hessian_components_cuda(
-        // Pass necessary parts of model, camera, render_output, loss_derivs
-        // and visibility information to select/process only visible Gaussians.
-        const SplatData& model_snapshot, // A const reference to current model state
+        const SplatData& model_snapshot,
         const torch::Tensor& visibility_mask_for_model, // [Total_N] bool tensor
         const Camera& camera,
-        const gs::RenderOutput& render_output, // Contains means2d, etc. for culled set by rasterizer
-        const LossDerivatives& loss_derivs,
-        int num_visible_gaussians_in_total_model // Count of true in visibility_mask_for_model
+        const gs::RenderOutput& render_output,
+        const torch::Tensor& d2L_dc2_diag_pixelwise_for_hessian, // [H, W, 3]
+        int num_visible_gaussians_in_total_model
     );
 
+    // This function projects both H and g. g will be derived from autograd_grad_means.
     torch::Tensor compute_projected_position_hessian_and_gradient(
         const torch::Tensor& H_p_packed, // [N_vis, 6]
         const torch::Tensor& grad_p,     // [N_vis, 3]
@@ -112,24 +118,30 @@ private:
     };
 
     AttributeUpdateOutput compute_scale_updates_newton(
-        /* const SplatData& model_snapshot, // Or use member model_ directly */
-        const torch::Tensor& visible_indices,
-        const LossDerivatives& loss_derivs,
+        const torch::Tensor& visible_indices, // Indices of visible Gaussians [N_vis]
+        const torch::Tensor& autograd_grad_scales_raw, // Autograd gradient for raw log_scales [N_vis, 3]
+        const torch::Tensor& d2L_dc2_diag_pixelwise_for_hessian, // [H, W, 3]
         const Camera& camera,
-        const gs::RenderOutput& render_output);
-        // opt_params_ref_ and options_ are member variables
+        const gs::RenderOutput& render_output
+        // model_ (SplatData) is a member, options_ is a member
+    );
 
     AttributeUpdateOutput compute_rotation_updates_newton(
-        const torch::Tensor& visible_indices,
-        const LossDerivatives& loss_derivs,
+        const torch::Tensor& visible_indices, // Indices of visible Gaussians [N_vis]
+        const torch::Tensor& autograd_grad_rotation_raw, // Autograd gradient for raw quaternions [N_vis, 4]
+                                                         // (or for angle if using angle parameterization for g)
+        const torch::Tensor& d2L_dc2_diag_pixelwise_for_hessian, // [H, W, 3]
         const Camera& camera,
-        const gs::RenderOutput& render_output);
+        const gs::RenderOutput& render_output
+    );
 
     AttributeUpdateOutput compute_opacity_updates_newton(
-        const torch::Tensor& visible_indices,
-        const LossDerivatives& loss_derivs,
+        const torch::Tensor& visible_indices, // Indices of visible Gaussians [N_vis]
+        const torch::Tensor& autograd_grad_opacity_raw, // Autograd gradient for raw logits [N_vis, 1]
+        const torch::Tensor& d2L_dc2_diag_pixelwise_for_hessian, // [H, W, 3]
         const Camera& camera,
-        const gs::RenderOutput& render_output);
+        const gs::RenderOutput& render_output
+    );
 
     AttributeUpdateOutput compute_sh_updates_newton(
         const torch::Tensor& visible_indices,

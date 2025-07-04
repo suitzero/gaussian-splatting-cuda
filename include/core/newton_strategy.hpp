@@ -62,6 +62,15 @@ private:
     gs::RenderOutput current_render_output_cache_; // Copied struct
     torch::Tensor current_visibility_mask_for_model_; // Mask for all P_total Gaussians
 
+    // Cached Autograd gradients
+    torch::Tensor autograd_grad_means_;
+    torch::Tensor autograd_grad_scales_raw_;
+    torch::Tensor autograd_grad_rotation_raw_;
+    torch::Tensor autograd_grad_opacity_raw_;
+    torch::Tensor autograd_grad_sh0_;
+    torch::Tensor autograd_grad_shN_;
+    // TODO: Add others if necessary (e.g. if features_direct becomes optimizable)
+
     // For KNN logic:
     std::shared_ptr<CameraDataset> train_dataset_ref_; // For accessing all camera poses and loading GTs for KNN
     // Caches Camera pointers from train_dataset_ref_ for quick lookup by UID to get GT images.
