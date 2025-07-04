@@ -278,7 +278,7 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
     float* grad_p_output_ptr = gs::torch_utils::get_data_ptr<float>(grad_p_output, "grad_p_output");
 
     NewtonKernels::compute_position_hessian_components_kernel_launcher(
-        render_output.height, render_output.width, static_cast<int>(render_output.image.size(-1)), // Image: H, W, C
+        render_output.height, render_output.width, static_cast<int>(loss_derivs.dL_dc.size(-1)), // Image: H, W, C (Use dL_dc for C)
         p_total_for_kernel, // Total P Gaussians in model
         means_3d_all_ptr,
         scales_all_ptr,
