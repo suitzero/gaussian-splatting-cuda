@@ -24,40 +24,22 @@ void compute_loss_derivatives_kernel_launcher(
 // G_L_c = 𝜕L/𝜕c (Gradient of loss w.r.t. final pixel color)
 // H_c_y = 𝜕²𝒄/𝜕p² (Hessian of final pixel color w.r.t. p_k)
 void compute_position_hessian_components_kernel_launcher(
-    // Image dimensions
-    int H, int W, int C_img, // C_img is number of channels in image (e.g. 3 for RGB)
-    // Gaussian properties (all Gaussians in the model)
+    int H, int W, int C_img, // Matched with .cuh
     int P_total,
-    const float* means_3d_all,
-    const float* scales_all,
-    const float* rotations_all,
-    const float* opacities_all,
-    const float* shs_all,
+    const float* means_3d_all, const float* scales_all, const float* rotations_all,
+    const float* opacities_all, const float* shs_all,
     int sh_degree,
-    int sh_coeffs_dim, // total dimension of SH coeffs per channel (e.g., (sh_degree+1)^2)
-    // Camera properties
-    const float* view_matrix,
-    const float* projection_matrix_for_jacobian, // Typically K matrix [3,3] or [4,4]
-    const float* cam_pos_world,
-    // Data from RenderOutput (for Gaussians processed by rasterizer, potentially culled)
-    const float* means_2d_render,  // [P_render, 2]
-    const float* depths_render,   // [P_render]
-    const float* radii_render,    // [P_render]
-    // visibility_indices_in_render_output (ranks) removed, P_render is the size of above arrays.
-    int P_render,
-    // Visibility mask for *all* Gaussians in the model [P_total]. True if Gaussian k is visible on screen.
-    const torch::Tensor& visibility_mask_for_model_tensor, // Changed from const bool*
-    // Loss derivatives (pixel-wise)
-    const float* dL_dc_pixelwise,          // [H, W, C_img]
-    const float* d2L_dc2_diag_pixelwise,   // [H, W, C_img]
-    // Output arrays are for Gaussians where visibility_mask_for_model is true.
-    // num_output_gaussians is the count of true in visibility_mask_for_model.
+    int sh_coeffs_dim,                           // Matched with .cuh
+    const float* view_matrix,                    // Matched with .cuh
+    const float* projection_matrix_for_jacobian, // Matched with .cuh
+    const float* cam_pos_world,                  // Matched with .cuh
+    const torch::Tensor& visibility_mask_for_model_tensor,
+    const float* dL_dc_pixelwise,        // Matched with .cuh
+    const float* d2L_dc2_diag_pixelwise, // Matched with .cuh
     int num_output_gaussians,
-    // Output arrays (dense, for visible Gaussians from model)
-    float* H_p_output_packed, // [num_output_gaussians, 6] (symmetric 3x3)
-    float* grad_p_output,     // [num_output_gaussians, 3]
-    bool debug_prints_enabled // For conditional printing inside launcher
-);
+    float* H_p_output_packed, // Matched with .cuh
+    float* grad_p_output,     // Matched with .cuh
+    bool debug_prints_enabled); 
 
 
 // Launcher for projecting Hessian and Gradient to camera plane

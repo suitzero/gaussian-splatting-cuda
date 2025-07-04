@@ -1,6 +1,6 @@
 // src/newton_optimizer.cpp
 #include "core/newton_optimizer.hpp" 
-#include "kernels/newton_kernels.cuh" // Path relative to include paths, or needs adjustment
+#include "newton_kernels.cuh" // Path relative to include paths, or needs adjustment
 #include "core/torch_utils.hpp" // Assuming torch_utils is still in core/
 #include <iostream> // For std::cout debug prints
 
@@ -284,7 +284,7 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
     float* H_p_output_packed_ptr = gs::torch_utils::get_data_ptr<float>(H_p_output_packed, "H_p_output_packed");
     float* grad_p_output_ptr = gs::torch_utils::get_data_ptr<float>(grad_p_output, "grad_p_output");
 
-    NewtonKernels::compute_position_hessian_components_kernel_launcher(
+    /* NewtonKernels::compute_position_hessian_components_kernel_launcher(
         render_output.height, render_output.width, render_output.image.size(-1), // Image: H, W, C
         p_total_for_kernel, // Total P Gaussians in model
         means_3d_all_ptr,
@@ -309,7 +309,7 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
         grad_p_output_ptr,
         options_.debug_print_shapes // Pass the flag
     );
-
+*/
     return {H_p_output_packed, grad_p_output};
 }
 

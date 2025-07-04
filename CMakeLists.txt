@@ -61,7 +61,7 @@ configure_file(
 )
 
 add_subdirectory(external)
-add_subdirectory(gsplat) # newton_optimizer and newton_kernels will be part of this target
+add_subdirectory(gsplat) 
 
 # =============================================================================
 # HOST LIBRARY - Compiled with g++ (fast!)
@@ -85,7 +85,6 @@ set(HOST_SOURCES
         src/selective_adam.cpp
 	src/knn_utils.cpp    # Added for KNN calculation
         src/setup_utils.cpp  # Added for KNN setup utility
-        # src/newton_optimizer.cpp # Moved to gsplat_backend
         src/newton_strategy.cpp # Added Newton strategy
 )
 
@@ -171,7 +170,6 @@ set(KERNEL_SOURCES
         kernels/bilateral_grid_forward.cu
         kernels/bilateral_grid_backward.cu
         kernels/bilateral_grid_tv.cu
-        # kernels/newton_kernels.cu # Moved to gsplat_backend
 )
 
 # Add CUDA-OpenGL interop kernels if supported
@@ -406,7 +404,7 @@ endfunction()
 
 configure_build_type(gaussian_host)
 configure_build_type(gaussian_kernels)
-configure_build_type(gsplat_backend) # Corrected back to gsplat_backend
+configure_build_type(gsplat_backend) 
 if(CUDA_GL_INTEROP_FOUND AND TARGET gaussian_visualizer)
     configure_build_type(gaussian_visualizer)
 endif()
@@ -466,9 +464,9 @@ if(BUILD_TESTS)
     )
 
     set(TEST_LINK_LIBRARIES
-            gsplat_backend  # Moved before gaussian_host
             gaussian_host
             gaussian_kernels
+            gsplat_backend 
             GTest::gtest
             GTest::gtest_main
             Python3::Python
