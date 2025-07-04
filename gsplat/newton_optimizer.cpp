@@ -56,21 +56,20 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
     torch::Tensor grad_p_output = torch::zeros({num_visible_gaussians_in_total_model, 3}, tensor_opts);
 
     // Prepare camera parameters
-    torch::Tensor view_mat_tensor_orig = camera.world_view_transform().to(dev).to(dtype); // Corrected method
-    torch::Tensor view_mat_tensor = view_mat_tensor_orig.contiguous(); // Ensure contiguity
-    torch::Tensor K_matrix = camera.K().to(dev).to(dtype).contiguous(); // Also ensure K_matrix is contiguous
+    torch::Tensor view_mat_tensor_orig = camera.world_view_transform().to(dev).to(dtype);
+    torch::Tensor view_mat_tensor = view_mat_tensor_orig.contiguous();
+    torch::Tensor K_matrix = camera.K().to(dev).to(dtype).contiguous();
 
     // Compute camera center C_w = -R_wc^T * t_wc from world_view_transform V = [R_wc | t_wc]
-    // V is typically [4,4] or [3,4]. Assuming [4,4] world-to-camera.
-    // Corrected slicing:
+    // Assuming V is [4,4] world-to-camera.
     torch::Tensor view_mat_2d = view_mat_tensor.select(0, 0); // Get [4,4] matrix assuming batch size is 1
-    torch::Tensor R_wc_2d = view_mat_2d.slice(0, 0, 3).slice(1, 0, 3); // Slice to [3,3]
-    torch::Tensor t_wc_2d = view_mat_2d.slice(0, 0, 3).slice(1, 3, 4); // Slice to [3,1]
-    torch::Tensor R_wc = R_wc_2d.unsqueeze(0); // Add batch dim -> [1,3,3]
-    torch::Tensor t_wc = t_wc_2d.unsqueeze(0); // Add batch dim -> [1,3,1]
+    torch::Tensor R_wc_2d = view_mat_2d.slice(0, 0, 3).slice(1, 0, 3); // [3,3]
+    torch::Tensor t_wc_2d = view_mat_2d.slice(0, 0, 3).slice(1, 3, 4); // [3,1]
+    torch::Tensor R_wc = R_wc_2d.unsqueeze(0); // [1,3,3]
+    torch::Tensor t_wc = t_wc_2d.unsqueeze(0); // [1,3,1]
 
     // Debug prints for shapes and strides
-    if (options_.debug_print_shapes) { // Assuming an option to enable/disable prints
+    if (options_.debug_print_shapes) {
         std::cout << "[DEBUG] compute_pos_hess: R_wc_T shape: " << R_wc.transpose(-2,-1).sizes()
                   << " strides: " << R_wc.transpose(-2,-1).strides()
                   << " contiguous: " << R_wc.transpose(-2,-1).is_contiguous() << std::endl;
@@ -183,36 +182,33 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
     if (options_.debug_print_shapes) {
         verbose_tensor_check_lambda =
             [](const std::string& name, const torch::Tensor& tensor, const std::string& expected_type_str) {
-            std::cout << "[VERBOSE_CHECK] Tensor: " << name << std::endl;
+            std::cout << "[VERBOSE_CHECK] Tensor: " << name;
             if (!tensor.defined()) {
-                std::cout << "  - Defined: No" << std::endl;
+                std::cout << " - UNDEFINED" << std::endl;
                 return;
             }
-            std::cout << "  - Defined: Yes" << std::endl;
-            std::cout << "  - Device: " << tensor.device() << std::endl;
-            std::cout << "  - Dtype: " << tensor.scalar_type() << " (Expected: " << expected_type_str << ")" << std::endl;
-            std::cout << "  - Contiguous: " << tensor.is_contiguous() << std::endl;
-            std::cout << "  - Sizes: " << tensor.sizes() << std::endl;
-            std::cout << "  - Numel: " << tensor.numel() << std::endl;
+            std::cout << " - Device: " << tensor.device()
+                      << ", Dtype: " << tensor.scalar_type() << " (Exp: " << expected_type_str << ")"
+                      << ", Contig: " << tensor.is_contiguous()
+                      << ", Sizes: " << tensor.sizes()
+                      << ", Numel: " << tensor.numel();
             try {
                 if (tensor.numel() > 0) {
-                    // Attempt to access data_ptr to see if it crashes here for this specific type
-                    // This is a bit risky as it might crash, but that's what we are debugging.
-                    // We are not actually using the pointer, just testing the call.
+                    // Attempt to access data_ptr
                     if (expected_type_str == "float") tensor.data_ptr<float>();
                     else if (expected_type_str == "bool") tensor.data_ptr<bool>();
                     else if (expected_type_str == "int") tensor.data_ptr<int>();
                     // Add other types if needed
-                    std::cout << "  - data_ptr<" << expected_type_str << "> call: OK (or returned nullptr for empty)" << std::endl;
+                    std::cout << ", data_ptr<" << expected_type_str << ">: OK";
                 } else {
-                    std::cout << "  - data_ptr<" << expected_type_str << "> call: Skipped (numel is 0)" << std::endl;
+                    std::cout << ", data_ptr<" << expected_type_str << ">: Skipped (empty)";
                 }
             } catch (const c10::Error& e) {
-                std::cout << "  - data_ptr<" << expected_type_str << "> call: FAILED (c10::Error): " << e.what() << std::endl;
+                std::cout << ", data_ptr<" << expected_type_str << ">: FAILED (c10::Error): " << e.what_without_backtrace();
             } catch (const std::exception& e) {
-                std::cout << "  - data_ptr<" << expected_type_str << "> call: FAILED (std::exception): " << e.what() << std::endl;
+                std::cout << ", data_ptr<" << expected_type_str << ">: FAILED (std::exception): " << e.what();
             } catch (...) {
-                std::cout << "  - data_ptr<" << expected_type_str << "> call: FAILED (unknown exception)" << std::endl;
+                std::cout << ", data_ptr<" << expected_type_str << ">: FAILED (unknown exception)";
             }
         };
 
@@ -235,10 +231,7 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
         verbose_tensor_check_lambda("grad_p_output", grad_p_output, "float");
     }
 
-
     // Prepare arguments for kernel launcher by getting data pointers
-    // Storing tensors locally before checking and getting data_ptr
-
     const torch::Tensor& arg_means3D = model_snapshot.get_means();
     const torch::Tensor& arg_scales = model_snapshot.get_scaling();
     const torch::Tensor& arg_rotations = model_snapshot.get_rotation();
@@ -284,8 +277,8 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
     float* H_p_output_packed_ptr = gs::torch_utils::get_data_ptr<float>(H_p_output_packed, "H_p_output_packed");
     float* grad_p_output_ptr = gs::torch_utils::get_data_ptr<float>(grad_p_output, "grad_p_output");
 
-    /* NewtonKernels::compute_position_hessian_components_kernel_launcher(
-        render_output.height, render_output.width, render_output.image.size(-1), // Image: H, W, C
+    NewtonKernels::compute_position_hessian_components_kernel_launcher(
+        render_output.height, render_output.width, static_cast<int>(render_output.image.size(-1)), // Image: H, W, C
         p_total_for_kernel, // Total P Gaussians in model
         means_3d_all_ptr,
         scales_all_ptr,
@@ -293,23 +286,19 @@ NewtonOptimizer::PositionHessianOutput NewtonOptimizer::compute_position_hessian
         opacities_all_ptr,
         shs_all_ptr,
         model_snapshot.get_active_sh_degree(),
-        static_cast<int>(model_snapshot.get_shs().size(1)), // sh_coeffs_dim
-        view_matrix_ptr,
-        K_matrix_ptr,
+        static_cast<int>(model_snapshot.get_shs().size(1)), // sh_coeffs_dim (sh_degree+1)^2
+        view_matrix_ptr, // world-to-camera view matrix
+        K_matrix_ptr,    // camera projection matrix (intrinsic K, possibly combined with extrinsics for full P) - named projection_matrix_for_jacobian in kernel
         cam_pos_world_ptr,
-        means_2d_render_ptr,
-        depths_render_ptr,
-        radii_render_ptr,
-        static_cast<int>(render_output.means2d.defined() ? render_output.means2d.size(0) : 0), // P_render
         visibility_mask_for_model, // Pass the tensor object directly
         dL_dc_pixelwise_ptr,
         d2L_dc2_diag_pixelwise_ptr,
-        num_visible_gaussians_in_total_model, // Number of Gaussians to produce output for
+        num_visible_gaussians_in_total_model, // Number of Gaussians to produce output for (visible and in model)
         H_p_output_packed_ptr,
         grad_p_output_ptr,
         options_.debug_print_shapes // Pass the flag
     );
-*/
+
     return {H_p_output_packed, grad_p_output};
 }
 
@@ -332,17 +321,15 @@ torch::Tensor NewtonOptimizer::compute_projected_position_hessian_and_gradient(
     auto tensor_opts = H_p_packed.options();
     torch::Tensor H_v_packed = torch::zeros({num_visible_gaussians, 3}, tensor_opts); // 3 for symmetric 2x2
 
-    torch::Tensor view_mat_tensor_orig = camera.world_view_transform().to(tensor_opts.device()); // Corrected
-    torch::Tensor view_mat_tensor = view_mat_tensor_orig.contiguous(); // Ensure contiguity
+    torch::Tensor view_mat_tensor_orig = camera.world_view_transform().to(tensor_opts.device());
+    torch::Tensor view_mat_tensor = view_mat_tensor_orig.contiguous();
     // Compute camera center C_w = -R_wc^T * t_wc
-    // Corrected slicing:
-    torch::Tensor view_mat_2d_proj = view_mat_tensor.select(0, 0); // Get [4,4] matrix assuming batch size is 1
-    torch::Tensor R_wc_2d_proj = view_mat_2d_proj.slice(0, 0, 3).slice(1, 0, 3); // Slice to [3,3]
-    torch::Tensor t_wc_2d_proj = view_mat_2d_proj.slice(0, 0, 3).slice(1, 3, 4); // Slice to [3,1]
-    torch::Tensor R_wc_proj = R_wc_2d_proj.unsqueeze(0); // Add batch dim -> [1,3,3]
-    torch::Tensor t_wc_proj = t_wc_2d_proj.unsqueeze(0); // Add batch dim -> [1,3,1]
+    torch::Tensor view_mat_2d_proj = view_mat_tensor.select(0, 0); // Assuming batch size is 1
+    torch::Tensor R_wc_2d_proj = view_mat_2d_proj.slice(0, 0, 3).slice(1, 0, 3);
+    torch::Tensor t_wc_2d_proj = view_mat_2d_proj.slice(0, 0, 3).slice(1, 3, 4);
+    torch::Tensor R_wc_proj = R_wc_2d_proj.unsqueeze(0);
+    torch::Tensor t_wc_proj = t_wc_2d_proj.unsqueeze(0);
 
-    // Debug prints for shapes and strides
     if (options_.debug_print_shapes) {
         std::cout << "[DEBUG] compute_proj_hess_grad: R_wc_proj_T shape: " << R_wc_proj.transpose(-2,-1).sizes()
                   << " strides: " << R_wc_proj.transpose(-2,-1).strides()
@@ -391,22 +378,20 @@ torch::Tensor NewtonOptimizer::solve_and_project_position_updates(
         gs::torch_utils::get_const_data_ptr<float>(H_v_projected_packed),
         gs::torch_utils::get_const_data_ptr<float>(grad_v_projected),
         static_cast<float>(damping),
-        static_cast<float>(step_scale), // step_scale is applied inside kernel: delta_v = -step_scale * H_inv * g
+        static_cast<float>(step_scale), // step_scale applied inside kernel
         gs::torch_utils::get_data_ptr<float>(delta_v)
     );
 
     torch::Tensor delta_p = torch::zeros({num_visible_gaussians, 3}, tensor_opts);
-    torch::Tensor view_mat_tensor_orig = camera.world_view_transform().to(tensor_opts.device()); // Corrected
-    torch::Tensor view_mat_tensor = view_mat_tensor_orig.contiguous(); // Ensure contiguity
+    torch::Tensor view_mat_tensor_orig = camera.world_view_transform().to(tensor_opts.device());
+    torch::Tensor view_mat_tensor = view_mat_tensor_orig.contiguous();
     // Compute camera center C_w = -R_wc^T * t_wc
-    // Corrected slicing:
-    torch::Tensor view_mat_2d_solve = view_mat_tensor.select(0, 0); // Get [4,4] matrix assuming batch size is 1
-    torch::Tensor R_wc_2d_solve = view_mat_2d_solve.slice(0, 0, 3).slice(1, 0, 3); // Slice to [3,3]
-    torch::Tensor t_wc_2d_solve = view_mat_2d_solve.slice(0, 0, 3).slice(1, 3, 4); // Slice to [3,1]
-    torch::Tensor R_wc_solve = R_wc_2d_solve.unsqueeze(0); // Add batch dim -> [1,3,3]
-    torch::Tensor t_wc_solve = t_wc_2d_solve.unsqueeze(0); // Add batch dim -> [1,3,1]
+    torch::Tensor view_mat_2d_solve = view_mat_tensor.select(0, 0); // Assuming batch size is 1
+    torch::Tensor R_wc_2d_solve = view_mat_2d_solve.slice(0, 0, 3).slice(1, 0, 3);
+    torch::Tensor t_wc_2d_solve = view_mat_2d_solve.slice(0, 0, 3).slice(1, 3, 4);
+    torch::Tensor R_wc_solve = R_wc_2d_solve.unsqueeze(0);
+    torch::Tensor t_wc_solve = t_wc_2d_solve.unsqueeze(0);
 
-    // Debug prints for shapes and strides
     if (options_.debug_print_shapes) {
         std::cout << "[DEBUG] solve_and_proj: R_wc_solve_T shape: " << R_wc_solve.transpose(-2,-1).sizes()
                   << " strides: " << R_wc_solve.transpose(-2,-1).strides()
@@ -729,27 +714,17 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_scale_updates_ne
     auto tensor_opts_float = current_scales_for_opt.options(); // Use renamed variable
 
     // --- Placeholder outputs from conceptual CUDA kernels ---
-    // These would compute ∂c/∂s_k and ∂²c/∂s_k² per pixel, then sum over pixels.
-    // For simplicity, let's assume they directly output per-Gaussian H_s and g_s.
     // H_s_k : [num_vis_gaussians, 6] (for 3x3 symmetric Hessian of scales)
     // g_s_k : [num_vis_gaussians, 3] (gradient w.r.t. scales)
     torch::Tensor H_s_packed = torch::zeros({num_vis_gaussians, 6}, tensor_opts_float);
     torch::Tensor g_s = torch::zeros({num_vis_gaussians, 3}, tensor_opts_float);
 
-    // Conceptual kernel call to compute per-Gaussian Hessian and gradient for scales
-    // This kernel would be extremely complex, involving:
-    // - Projecting Gaussians (like in position solve)
-    // - Calculating ∂Σ_k/∂s_k (how 3D scale affects 2D covariance)
-    // - Calculating ∂G_k/∂Σ_k (how Gaussian PDF changes with 2D covariance)
-    // - Calculating ∂c/∂G_k (how color changes with Gaussian PDF value - depends on blending)
-    // - Chaining these for ∂c/∂s_k and its second derivative ∂²c/∂s_k²
-    // - Summing contributions over pixels using loss_derivs.dL_dc and loss_derivs.d2L_dc2_diag
-    //   to form H_s_k and g_s_k using equations like:
-    //   g_s_k = sum_pixels [ (∂c(pixel)/∂s_k)ᵀ * (dL/dc(pixel)) ]
-    //   H_s_k = sum_pixels [ (∂c(pixel)/∂s_k)ᵀ * (d²L/dc²(pixel)) * (∂c(pixel)/∂s_k) + (dL/dc(pixel)) ⋅ (∂²c(pixel)/∂s_k²) ]
+    // Conceptual kernel call to compute per-Gaussian Hessian (H_s_k) and gradient (g_s_k) for scales.
+    // This involves calculating derivatives like ∂c/∂s_k and ∂²c/∂s_k², then summing over pixels
+    // using loss derivatives (dL/dc, d²L/dc²) to form H_s_k and g_s_k.
     /*
     NewtonKernels::compute_scale_hessian_gradient_components_kernel_launcher(
-        render_output.height, render_output.width, render_output.image.size(-1), // C_img
+        render_output.height, render_output.width, static_cast<int>(render_output.image.size(-1)), // C_img
         model_, // Pass relevant parts of model or specific tensors
         visible_indices,
         view_mat_tensor, // Need view_mat from primary_camera
@@ -842,15 +817,11 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_rotation_updates
     torch::Tensor H_theta = torch::zeros({num_vis_gaussians, 1}, tensor_opts_float);
     torch::Tensor g_theta = torch::zeros({num_vis_gaussians, 1}, tensor_opts_float);
 
-    // Conceptual kernel call to compute per-Gaussian Hessian and gradient for rotation angle theta_k
-    // This kernel would be very complex:
-    // - For each Gaussian, determine r_k.
-    // - Compute ∂c/∂θ_k and ∂²c/∂θ_k² (paper: (∂c/∂G_k)*(∂G_k/∂Σ_k)*(∂Σ_k/∂θ_k) and its second derivative).
-    //   This involves derivatives of 2D covariance Σ_k w.r.t. θ_k.
-    // - Sum contributions over pixels using loss_derivs.dL_dc and loss_derivs.d2L_dc2_diag.
+    // Conceptual kernel call to compute per-Gaussian Hessian (H_theta_k) and gradient (g_theta_k)
+    // for rotation angle theta_k around axis r_k. Involves derivatives like ∂c/∂θ_k.
     /*
     NewtonKernels::compute_rotation_hessian_gradient_components_kernel_launcher(
-        render_output.height, render_output.width, render_output.image.size(-1),
+        render_output.height, render_output.width, static_cast<int>(render_output.image.size(-1)),
         model_, // or specific tensors: means, scales, rotations, opacities, shs
         visible_indices,
         r_k_vecs, // Axis of rotation for each Gaussian
@@ -952,29 +923,26 @@ NewtonOptimizer::AttributeUpdateOutput NewtonOptimizer::compute_opacity_updates_
     // g_barrier *= alpha_sigma; H_barrier *= alpha_sigma; // (This depends on precise definition)
 
     // --- Placeholder for base Hessian and Gradient from color terms ---
-    // H_sigma_base_k : [num_vis_gaussians, 1] (scalar Hessian for opacity sigma_k from color rendering)
-    // g_sigma_base_k : [num_vis_gaussians, 1] (scalar gradient w.r.t. sigma_k from color rendering)
-    torch::Tensor H_sigma_base = torch::zeros({num_vis_gaussians}, tensor_opts_float); // scalar, so [N_vis]
-    torch::Tensor g_sigma_base = torch::zeros({num_vis_gaussians}, tensor_opts_float); // scalar, so [N_vis]
+    // H_sigma_base_k : [num_vis_gaussians] (scalar Hessian for opacity sigma_k from color rendering)
+    // g_sigma_base_k : [num_vis_gaussians] (scalar gradient w.r.t. sigma_k from color rendering)
+    torch::Tensor H_sigma_base = torch::zeros({num_vis_gaussians}, tensor_opts_float);
+    torch::Tensor g_sigma_base = torch::zeros({num_vis_gaussians}, tensor_opts_float);
 
     // Conceptual CUDA kernel calls:
-    // 1. Kernel to compute dc_dopacity = ∂c/∂σ_k for each visible Gaussian & affected pixel.
-    //    Paper: ∂c/∂σ_k = G_k (Π(1-α_j)) (c_gauss_k - C_contrib_behind)
-    //    Paper also states ∂²c/∂σ_k² = 0. This simplifies H_sigma_base.
-    //    This dc_dopacity would be [N_vis, Num_pixels_affected_by_k, C_channels]
-    //    For now, this is a major missing piece.
+    // 1. Compute dc_dopacity = ∂c/∂σ_k. Paper: ∂c/∂σ_k = G_k (Π(1-α_j)) (c_gauss_k - C_contrib_behind).
+    //    Paper states ∂²c/∂σ_k² = 0, simplifying H_sigma_base.
     /*
-    torch::Tensor dc_dopacity_packed; // Complex output
+    torch::Tensor dc_dopacity_packed; // Placeholder for complex derivative output
     NewtonKernels::compute_dc_dopacity_kernel_launcher(
         model_, visible_indices, camera, render_output, dc_dopacity_packed);
     */
 
-    // 2. Kernel to accumulate H_sigma_base and g_sigma_base using dc_dopacity.
+    // 2. Accumulate H_sigma_base and g_sigma_base using dc_dopacity and loss derivatives.
     //    g_sigma_base_k = sum_pixels [ (∂c/∂σ_k)ᵀ ⋅ (dL/dc) ]
-    //    H_sigma_base_k = sum_pixels [ (∂c/∂σ_k)ᵀ ⋅ (d²L/dc²) ⋅ (∂c/∂σ_k) ] (since ∂²c/∂σ_k² = 0)
+    //    H_sigma_base_k = sum_pixels [ (∂c/∂σ_k)ᵀ ⋅ (d²L/dc²) ⋅ (∂c/∂σ_k) ]
     /*
-    NewtonKernels::accumulate_opacity_hessian_gradient_kernel_launcher(
-        dc_dopacity_packed, // From previous kernel
+    NewtonKernels::accumulate_opacity_hessian_gradient_kernel_launcher( // This kernel is not defined yet
+        dc_dopacity_packed,
         loss_derivs.dL_dc,
         loss_derivs.d2L_dc2_diag,
         render_output, // For pixel mapping if needed
