@@ -15,17 +15,16 @@ NewtonOptimizer::NewtonOptimizer(SplatData& splat_data,
 // Main step function
 void NewtonOptimizer::step(int iteration,
                            const torch::Tensor& visibility_mask_for_model, // Boolean mask for model_.means() [N_total]
-                           const torch::Tensor& autograd_grad_means_total,       // [N_total, 3]
-                           const torch::Tensor& autograd_grad_scales_raw_total,  // [N_total, 3]
-                           const torch::Tensor& autograd_grad_rotation_raw_total, // [N_total, 4]
-                           const torch::Tensor& autograd_grad_opacity_raw_total, // [N_total, 1]
-                           const torch::Tensor& autograd_grad_sh0_total,         // [N_total, 1, 3]
-                           const torch::Tensor& autograd_grad_shN_total,         // [N_total, K-1, 3]
+                           const torch::Tensor& grad_means,                // [N_total, 3]
+                           const torch::Tensor& grad_scales_raw,           // [N_total, 3]
+                           const torch::Tensor& grad_rotation_raw,         // [N_total, 4]
+                           const torch::Tensor& grad_opacity_raw,          // [N_total, 1]
+                           const torch::Tensor& grad_sh0,                  // [N_total, 1, 3]
+                           const torch::Tensor& grad_shN,                  // [N_total, K-1, 3]
                            const gs::RenderOutput& current_render_output,
                            const Camera& primary_camera,
                            const torch::Tensor& primary_gt_image,
                            const std::vector<std::pair<const Camera*, torch::Tensor>>& knn_secondary_targets_data) {
-
     torch::NoGradGuard no_grad; // Ensure no graph operations are tracked for optimizer steps
 
     torch::Tensor visible_indices = torch::where(visibility_mask_for_model)[0];
@@ -45,9 +44,6 @@ void NewtonOptimizer::step(int iteration,
              std::cout << "[NewtonOpt] Step: No visible Gaussians based on mask at iteration " << iteration << ". Skipping Newton update." << std::endl;
         }
         return; // Early exit if no Gaussians are visible
-    }
-
-    if (options_.optimize_means) {
     }
 
     // === 4. OPACITY OPTIMIZATION ===
