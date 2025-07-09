@@ -4,6 +4,17 @@ namespace gs {
 
     using namespace torch::indexing;
 
+    // ensure it is being tracked
+    inline torch::Tensor et(torch::Tensor t) {
+        torch::Tensor res;
+        if (t.defined())
+            res = t.sum();
+        else
+            res = torch::zeros({});
+        return res;
+    }
+
+
     // ProjectionFunction implementation
     torch::autograd::tensor_list ProjectionFunction::forward(
         torch::autograd::AutogradContext* ctx,
@@ -120,6 +131,10 @@ namespace gs {
         ctx->save_for_backward({means3D, quats, scaled_scales, opacities, viewmat, K, settings,
                                 radii, conics, compensations});
 
+        // fake operation to track by the autograd graph
+        auto dummy = et(quats) + et(scales) + et(opacities);
+        means2d += means2d * dummy;
+        conics += conics * dummy;
         return {radii, means2d, depths, conics, compensations};
     }
 
@@ -293,6 +308,9 @@ namespace gs {
         ctx->saved_data["sh_degree"] = sh_degree;
         ctx->saved_data["num_bases"] = coeffs.size(-2); // Save the full K dimension
 
+        // fake operation to track in the autograd graph
+        colors += colors * (et(sh_degree_tensor) + et(dirs) + et(masks) + et(coeffs));
+
         return {colors};
     }
 
@@ -440,6 +458,9 @@ namespace gs {
         ctx->save_for_backward({means2d, conics, colors, opacities, bg_color,
                                 isect_offsets, flatten_ids, rendered_alpha, last_ids, settings});
 
+        // fake operation to be tracked by the autograd graph
+        rendered_image += rendered_image * (et(means2d)+et(conics)+et(opacities)+et(colors));
+
         return {rendered_image, rendered_alpha, last_ids};
     }
 
@@ -557,6 +578,7 @@ namespace gs {
 
         // Save for backward
         ctx->save_for_backward({quats, scales, settings, covars, precis});
+        covars += covars * (et(quats) + et(scales));
 
         return {covars, precis};
     }

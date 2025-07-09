@@ -230,12 +230,12 @@ namespace gs {
 
         current_loss_ = loss.item<float>();
 
+        torch::autograd::variable_list latest_autograd_gradients_,params;
         if (!params_.optimization.use_newton_optimizer)
 			loss.backward();
         else {
-            torch::autograd::variable_list vl = {strategy_->get_model().get_means(), strategy_->get_model().get_rotation(), strategy_->get_model().get_scaling(), strategy_->get_model().get_opacity(), strategy_->get_model().get_shs()};
-            auto grad = torch::autograd::grad({loss}, {vl}, {}, std::nullopt, true);
-			NewtonStrategy::conjugate_gradient_solver(vl, grad);
+            torch::autograd::variable_list params = {strategy_->get_model().get_means(), strategy_->get_model().get_rotation(), strategy_->get_model().get_scaling(), strategy_->get_model().get_opacity(), strategy_->get_model().get_shs()};
+            auto latest_autograd_gradients_ = torch::autograd::grad({loss}, {params}, {}, std::nullopt, true);
         }
 
         {
@@ -262,6 +262,7 @@ namespace gs {
             auto do_strategy = [&]() {
                 // If NewtonStrategy, provide it with necessary per-frame data
                 if (auto* newton_strat = dynamic_cast<NewtonStrategy*>(strategy_.get())) {
+                    newton_strat->conjugate_gradient_solver(params, latest_autograd_gradients_);
                     newton_strat->set_current_view_data(
                         cam,
                         gt_image, // gt_image is already on device if loaded by dataloader correctly

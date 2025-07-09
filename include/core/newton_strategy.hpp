@@ -26,7 +26,7 @@ public:
 
     ~NewtonStrategy() override = default;
 
-    static void conjugate_gradient_solver(torch::autograd::variable_list vl, torch::autograd::variable_list grad){};
+    void conjugate_gradient_solver(torch::autograd::variable_list params, torch::autograd::variable_list grads){};
 
     void initialize(const gs::param::OptimizationParameters& optimParams) override;
 
