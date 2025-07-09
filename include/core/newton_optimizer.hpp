@@ -27,7 +27,7 @@ public:
         bool optimize_rotations = true;
         bool optimize_opacities = true;
         bool optimize_shs = true;
-        bool debug_print_shapes = true;         // Defaulted to false now
+        bool debug_print_shapes = false;         // Defaulted to false now
     };
 
     NewtonOptimizer(SplatData& splat_data,

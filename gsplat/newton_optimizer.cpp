@@ -37,6 +37,7 @@ void NewtonOptimizer::step(int iteration,
                   << ", num_visible_gaussians_in_model (from mask): " << num_visible_gaussians_in_model
                   << ", visibility_mask_for_model sum: " << visibility_sum
                   << std::endl;
+        std::cout << "means:"  << grad_means.sizes() << std::endl;
     }
 
     if (num_visible_gaussians_in_model == 0) {

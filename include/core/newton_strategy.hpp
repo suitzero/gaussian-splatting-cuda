@@ -26,6 +26,8 @@ public:
 
     ~NewtonStrategy() override = default;
 
+    static void conjugate_gradient_solver(torch::autograd::variable_list vl, torch::autograd::variable_list grad){};
+
     void initialize(const gs::param::OptimizationParameters& optimParams) override;
 
     // Called after loss.backward() but before optimizer.step()

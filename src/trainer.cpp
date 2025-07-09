@@ -50,8 +50,7 @@ namespace gs {
 		auto ssim_loss = 1.f - fused_ssim(rendered, gt, "valid", /*train=*/true);
         if (opt_params.use_newton_optimizer) {
             auto l2_loss = torch::mse_loss(rendered, gt);
-			loss = (1.f - opt_params.lambda_dssim) * l2_loss +
-                             opt_params.lambda_dssim * ssim_loss;
+			loss = l2_loss + opt_params.lambda_dssim * ssim_loss;
         } else {
 			auto l1_loss = torch::l1_loss(rendered, gt);
             loss = (1.f - opt_params.lambda_dssim) * l1_loss +
@@ -231,7 +230,13 @@ namespace gs {
 
         current_loss_ = loss.item<float>();
 
-        loss.backward();
+        if (!params_.optimization.use_newton_optimizer)
+			loss.backward();
+        else {
+            torch::autograd::variable_list vl = {strategy_->get_model().get_means(), strategy_->get_model().get_rotation(), strategy_->get_model().get_scaling(), strategy_->get_model().get_opacity(), strategy_->get_model().get_shs()};
+            auto grad = torch::autograd::grad({loss}, {vl}, {}, std::nullopt, true);
+			NewtonStrategy::conjugate_gradient_solver(vl, grad);
+        }
 
         {
             torch::NoGradGuard no_grad;
