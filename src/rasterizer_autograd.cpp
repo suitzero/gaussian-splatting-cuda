@@ -196,10 +196,21 @@ namespace gs {
             v_scales = v_scales * scaling_modifier;
         }
 
-        // v_opacities is computed from v_compensations only if opacities was defined
+        // Initialize v_opacities. If opacities requires grad, it must receive a defined tensor.
         torch::Tensor v_opacities;
-        if (opacities.defined() && v_compensations.has_value() && compensations_opt.has_value()) {
-            v_opacities = (v_compensations.value() * compensations_opt.value() / opacities.unsqueeze(0)).sum(0);
+        if (ctx->needs_input_grad(3) && opacities.defined()) {
+            if (v_compensations.has_value() && compensations_opt.has_value() && compensations_opt.value().numel() > 0 && opacities.numel() > 0) {
+                // Gradient path through compensations
+                // Add epsilon to prevent division by zero if opacities can be zero.
+                v_opacities = (v_compensations.value() * compensations_opt.value() / (opacities.unsqueeze(0) + 1e-8)).sum(0);
+            } else {
+                // No gradient path through compensations from this function.
+                // The gsplat kernel's backward pass (projection_ewa_3dgs_fused_bwd) does not compute gradients
+                // with respect to opacities for its other outputs (radii, means2d, etc.).
+                // So, if opacities influenced those outputs (e.g., via culling), those gradient paths are missing here.
+                // We must return a zero tensor if opacities requires grad.
+                v_opacities = torch::zeros_like(opacities, opacities.options());
+            }
         }
 
         // Check which inputs need gradients and set to undefined if not needed
@@ -213,9 +224,7 @@ namespace gs {
         if (!ctx->needs_input_grad(2)) { // scales
             v_scales = torch::Tensor();
         }
-        if (!ctx->needs_input_grad(3)) { // opacities
-            v_opacities = torch::Tensor();
-        }
+        // v_opacities is already handled based on ctx->needs_input_grad(3)
         if (!ctx->needs_input_grad(4)) { // viewmat
             v_viewmat = torch::Tensor();
         }

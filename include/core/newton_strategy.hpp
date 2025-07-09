@@ -26,7 +26,10 @@ public:
 
     ~NewtonStrategy() override = default;
 
-    static void conjugate_gradient_solver(torch::autograd::variable_list vl, torch::autograd::variable_list grad){};
+    // Non-static CG solver. Solves H dx = -g.
+    // Gradients (g) are expected to be cached in autograd_grad_* members.
+    // Result (dx) is stored in delta_* members.
+    void conjugate_gradient_solver();
 
     void initialize(const gs::param::OptimizationParameters& optimParams) override;
 
@@ -49,10 +52,19 @@ public:
         const torch::Tensor& primary_gt_image, // on device
         const gs::RenderOutput& render_output, // from rasterizer
         const gs::param::OptimizationParameters& opt_params,
-        int iteration
+        int iteration,
+        const torch::autograd::variable_list& autograd_gradients // Pass gradients computed by trainer
         );
 
 private:
+    // To store the result of CG solver (the step dx)
+    torch::Tensor delta_means_;
+    torch::Tensor delta_scales_;
+    torch::Tensor delta_rotations_;
+    torch::Tensor delta_opacities_;
+    torch::Tensor delta_sh0_; // For SH degrees 0
+    torch::Tensor delta_shN_; // For SH degrees > 0
+
     std::unique_ptr<SplatData> splat_data_; // Strategy owns the model
     std::unique_ptr<NewtonOptimizer> optimizer_;
     gs::param::OptimizationParameters optim_params_cache_; // Store a copy of optimization params

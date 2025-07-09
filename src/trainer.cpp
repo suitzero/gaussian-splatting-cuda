@@ -230,12 +230,31 @@ namespace gs {
 
         current_loss_ = loss.item<float>();
 
-        if (!params_.optimization.use_newton_optimizer)
+        if (!params_.optimization.use_newton_optimizer) {
 			loss.backward();
-        else {
-            torch::autograd::variable_list vl = {strategy_->get_model().get_means(), strategy_->get_model().get_rotation(), strategy_->get_model().get_scaling(), strategy_->get_model().get_opacity(), strategy_->get_model().get_shs()};
-            auto grad = torch::autograd::grad({loss}, {vl}, {}, std::nullopt, true);
-			NewtonStrategy::conjugate_gradient_solver(vl, grad);
+        } else {
+            // For NewtonOptimizer, we compute gradients explicitly
+            // vl must contain tensors that require grad and were used in loss computation
+            torch::autograd::variable_list vl;
+            if (strategy_->get_model().get_means().requires_grad()) vl.push_back(strategy_->get_model().get_means());
+            if (strategy_->get_model().get_rotation().requires_grad()) vl.push_back(strategy_->get_model().get_rotation());
+            if (strategy_->get_model().get_scaling().requires_grad()) vl.push_back(strategy_->get_model().get_scaling());
+            if (strategy_->get_model().get_opacity().requires_grad()) vl.push_back(strategy_->get_model().get_opacity());
+            if (strategy_->get_model().get_shs().requires_grad()) vl.push_back(strategy_->get_model().get_shs());
+            // Add other optimizable params to vl if they exist and require grad
+
+            auto grad_list = torch::autograd::grad({loss}, {vl}, {}, /* grad_outputs */
+                                             true, /* create_graph */
+                                             params_.optimization.allow_unused_grad); /* allow_unused */
+
+            // The gradients are now in grad_list.
+            // These will be passed to NewtonStrategy via set_current_view_data.
+            // The conjugate_gradient_solver will be called inside NewtonStrategy::step().
+
+            // Store grad_list to pass to set_current_view_data
+            // This assumes that set_current_view_data is called after this block
+            // and before strategy_->step(). This is the current structure.
+            latest_autograd_gradients_ = grad_list;
         }
 
         {
@@ -262,17 +281,27 @@ namespace gs {
             auto do_strategy = [&]() {
                 // If NewtonStrategy, provide it with necessary per-frame data
                 if (auto* newton_strat = dynamic_cast<NewtonStrategy*>(strategy_.get())) {
+                    // Pass the computed gradients if using Newton optimizer
+                    torch::autograd::variable_list grads_to_pass;
+                    if (params_.optimization.use_newton_optimizer) {
+                        grads_to_pass = latest_autograd_gradients_;
+                    }
                     newton_strat->set_current_view_data(
                         cam,
                         gt_image, // gt_image is already on device if loaded by dataloader correctly
                         r_output,
                         params_.optimization, // Pass current opt params
-                        iter
+                        iter,
+                        grads_to_pass // Pass the gradients
                     );
                 }
                 // post_backward might still be useful for other strategies, or NewtonStrategy can use it too
+                // If use_newton_optimizer is true, gradients are in latest_autograd_gradients_ and passed to set_current_view_data.
+                // If use_newton_optimizer is false, loss.backward() was called, actual .grad attributes are populated.
+                // NewtonStrategy::post_backward can then choose to read from its cached autograd_grad_ members (set by set_current_view_data)
+                // or from .grad attributes if needed (though less likely if grads are passed explicitly).
                 strategy_->post_backward(iter, r_output);
-                strategy_->step(iter);
+                strategy_->step(iter); // NewtonStrategy::step will call CG solver internally
             };
 
             if (viewer_) {
