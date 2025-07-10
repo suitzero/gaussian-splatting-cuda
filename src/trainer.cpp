@@ -233,23 +233,23 @@ namespace gs {
         // Declare variables for gradients, HVP, and parameters from the strategy method
         torch::autograd::variable_list trainer_params;
         std::vector<torch::Tensor> trainer_grads;
-        std::vector<torch::Tensor> trainer_hvp_result;
+        // trainer_grads, trainer_hvp_result, trainer_params are no longer populated here
+        // as loss_backward_and_hvp is void and stores results internally in NewtonStrategy.
 
         if (!params_.optimization.use_newton_optimizer) {
 			loss.backward();
-            // Note: If newton optimizer is not used, grads and hvp_result will be empty.
-            // The strategy's step method will handle standard optimizer steps.
         } else {
-            // Newton optimizer path: call the strategy's method to compute grads and HVP
-            // This method also handles setting .grad on the parameters.
-            auto strategy_outputs = strategy_->loss_backward_and_hvp(loss);
-            trainer_grads = std::get<0>(strategy_outputs);
-            trainer_hvp_result = std::get<1>(strategy_outputs);
-            trainer_params = std::get<2>(strategy_outputs);
-            // Gradients are now also set on the parameters themselves (param.mutable_grad())
-            // The MCMC-based NewtonStrategy does not have a conjugate_gradient_solver method.
-            // The HVP and grads are computed and grads are set, but further use of HVP
-            // would need to be implemented in NewtonStrategy::step or a similar method.
+            // Ensure strategy_ is of NewtonStrategy type or that IStrategy has a virtual method
+            // if we want to avoid dynamic_cast or static_cast here.
+            // For now, assuming strategy_ is known to be NewtonStrategy* when use_newton_optimizer is true.
+            // The dynamic_cast in do_strategy was removed, so direct call or static_cast is needed.
+            if (auto* newton_strat = dynamic_cast<NewtonStrategy*>(strategy_.get())) {
+                 newton_strat->loss_backward_and_hvp(loss);
+            } else {
+                // Fallback or error if strategy_ is not NewtonStrategy but use_newton_optimizer is true
+                std::cerr << "Error: use_newton_optimizer is true, but strategy is not NewtonStrategy." << std::endl;
+                loss.backward(); // Fallback to standard backward
+            }
         }
 
         {
@@ -274,14 +274,6 @@ namespace gs {
             }
 
             auto do_strategy = [&]() {
-                // The new loss_backward_and_hvp method in NewtonStrategy (MCMC-based) handles
-                // gradient calculation, HVP, and setting .grad on parameters if use_newton_optimizer is true.
-                // The MCMC-based NewtonStrategy does not have conjugate_gradient_solver or set_current_view_data.
-                // Those calls were specific to a different NewtonStrategy structure.
-
-                // These are standard strategy interface calls.
-                // post_backward in the MCMC-based strategy handles refinement and noise injection.
-                // step handles the optimizer step.
                 strategy_->post_backward(iter, r_output);
                 strategy_->step(iter);
             };
