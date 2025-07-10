@@ -1,303 +1,701 @@
 #include "core/newton_strategy.hpp"
-#include "core/rasterizer.hpp" // For gs::rasterize if needed for secondary targets
-#include "core/torch_utils.hpp" // For get_bg_color_from_image
+#include "Ops.h"
+#include "core/debug_utils.hpp"
+#include "core/parameters.hpp"
+#include "core/rasterizer.hpp"
+#include <c10/cuda/CUDACachingAllocator.h>
+#include <exception>
+#include <iostream>
+#include <random>
 
-#include <algorithm> // for std::sort, std::nth_element
-#include <limits>    // for std::numeric_limits
-#include <torch/torch.h> // Ensure torch is included for tensor operations
-#include <unordered_map> // For uid_to_camera_cache_
+void NewtonStrategy::ExponentialLR::step() {
+    if (param_group_index_ >= 0) {
+        auto& group = optimizer_.param_groups()[param_group_index_];
 
-// Note: spherical_distance helper function is removed as KNNs are now precomputed.
-
-NewtonStrategy::NewtonStrategy(
-    std::unique_ptr<SplatData> splat_data_owner,
-    std::shared_ptr<CameraDataset> train_dataset_for_knn)
-: splat_data_(std::move(splat_data_owner)),
-  train_dataset_ref_(train_dataset_for_knn) {
-    TORCH_CHECK(splat_data_, "NewtonStrategy: SplatData owner cannot be null.");
-    TORCH_CHECK(train_dataset_ref_, "NewtonStrategy: CameraDataset reference cannot be null.");
-
-    // optim_params_cache_ will be set in initialize() by the Trainer.
-    // Caching camera references can be done here or in initialize,
-    // but it depends on train_dataset_ref_ which is available now.
-    cache_camera_references();
-}
-
-void NewtonStrategy::initialize(const gs::param::OptimizationParameters& optimParams) {
-    optim_params_cache_ = optimParams;
-
-    if (optim_params_cache_.use_newton_optimizer) {
-        NewtonOptimizer::Options newton_opts;
-        newton_opts.knn_k = optim_params_cache_.newton_knn_k; // This K is for overshoot prevention in Newton step
-                                                       // The K for finding secondary targets comes from SplatData's KNNs
-
-        // Attribute-specific optimization flags
-        newton_opts.optimize_means = optim_params_cache_.newton_optimize_means;
-        newton_opts.optimize_scales = optim_params_cache_.newton_optimize_scales;
-        newton_opts.optimize_rotations = optim_params_cache_.newton_optimize_rotations;
-        newton_opts.optimize_opacities = optim_params_cache_.newton_optimize_opacities;
-        newton_opts.optimize_shs = optim_params_cache_.newton_optimize_shs;
-
-        optimizer_ = std::make_unique<NewtonOptimizer>(*splat_data_, optim_params_cache_, newton_opts);
-
+        // Try to cast to our custom Options first
+        if (auto* selective_adam_options = dynamic_cast<gs::SelectiveAdam::Options*>(&group.options())) {
+            double current_lr = selective_adam_options->lr();
+            selective_adam_options->lr(current_lr * gamma_);
+        } else if (auto* adam_options = dynamic_cast<torch::optim::AdamOptions*>(&group.options())) {
+            double current_lr = adam_options->lr();
+            adam_options->lr(current_lr * gamma_);
+        }
     } else {
-        // Fallback or error if this strategy is used when use_newton_optimizer is false
-        // Or, this strategy should only be created if use_newton_optimizer is true.
-        TORCH_CHECK(false, "NewtonStrategy initialized but use_newton_optimizer is false in params!");
+        // Update all param groups
+        for (auto& group : optimizer_.param_groups()) {
+            if (auto* selective_adam_options = dynamic_cast<gs::SelectiveAdam::Options*>(&group.options())) {
+                double current_lr = selective_adam_options->lr();
+                selective_adam_options->lr(current_lr * gamma_);
+            } else if (auto* adam_options = dynamic_cast<torch::optim::AdamOptions*>(&group.options())) {
+                double current_lr = adam_options->lr();
+                adam_options->lr(current_lr * gamma_);
+            }
+        }
     }
 }
 
-void NewtonStrategy::compute_visibility_mask_for_model(const gs::RenderOutput& render_output, const SplatData& model) {
-    // Based on investigation, render_output.visibility is already a boolean mask
-    // of shape [P_total] (total number of Gaussians in the model),
-    // indicating which Gaussians have a projected radius > 0.
-    // This is suitable for use as visibility_mask_for_model.
+NewtonStrategy::NewtonStrategy(SplatData&& splat_data)
+    : _splat_data(std::move(splat_data)) {
+}
 
-    if (!render_output.visibility.defined()) {
-        std::cerr << "Warning: render_output.visibility is not defined in NewtonStrategy. Defaulting to all-false mask." << std::endl;
-        current_visibility_mask_for_model_ = torch::zeros({model.size()},
-            torch::TensorOptions().dtype(torch::kBool).device(model.get_means().device()));
+torch::Tensor NewtonStrategy::multinomial_sample(const torch::Tensor& weights, int n, bool replacement) {
+    const int64_t num_elements = weights.size(0);
+
+    // PyTorch's multinomial has a limit of 2^24 elements
+    if (num_elements <= (1 << 24)) {
+        return torch::multinomial(weights, n, replacement);
+    } else {
+        // For larger arrays, we need to implement sampling manually
+        auto weights_normalized = weights / weights.sum();
+        auto weights_cpu = weights_normalized.cpu();
+
+        std::vector<int64_t> sampled_indices;
+        sampled_indices.reserve(n);
+
+        // Create cumulative distribution
+        auto cumsum = weights_cpu.cumsum(0);
+        auto cumsum_data = cumsum.accessor<float, 1>();
+
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_real_distribution<float> dis(0.0, 1.0);
+
+        for (int i = 0; i < n; ++i) {
+            float u = dis(gen);
+            // Binary search for the index
+            int64_t idx = 0;
+            int64_t left = 0, right = num_elements - 1;
+            while (left <= right) {
+                int64_t mid = (left + right) / 2;
+                if (cumsum_data[mid] < u) {
+                    left = mid + 1;
+                } else {
+                    idx = mid;
+                    right = mid - 1;
+                }
+            }
+            sampled_indices.push_back(idx);
+        }
+
+        auto result = torch::tensor(sampled_indices, torch::kLong);
+        return result.to(weights.device());
+    }
+}
+
+void NewtonStrategy::update_optimizer_for_relocate(torch::optim::Optimizer* optimizer,
+                                         const torch::Tensor& sampled_indices,
+                                         const torch::Tensor& dead_indices,
+                                         int param_position) {
+    // Get the parameter
+    auto& param = optimizer->param_groups()[param_position].params()[0];
+    void* param_key = param.unsafeGetTensorImpl();
+
+    // Check if optimizer state exists
+    auto state_it = optimizer->state().find(param_key);
+    if (state_it == optimizer->state().end()) {
+        // No state exists yet - this can happen if optimizer.step() hasn't been called
+        // In this case, there's nothing to reset, so we can safely return
         return;
     }
 
-    TORCH_CHECK(render_output.visibility.dim() == 1 && render_output.visibility.size(0) == model.size(),
-                "NewtonStrategy: render_output.visibility shape mismatch. Expected [P_total], got ",
-                render_output.visibility.sizes());
-    TORCH_CHECK(render_output.visibility.scalar_type() == torch::kBool,
-                "NewtonStrategy: render_output.visibility dtype mismatch. Expected Bool, got ",
-                render_output.visibility.scalar_type());
+    // Get the optimizer state - handle both Adam types
+    auto& param_state = *state_it->second;
 
-    current_visibility_mask_for_model_ = render_output.visibility.to(model.get_means().device()); // Ensure it's on the same device
+    if (auto* adam_state = dynamic_cast<torch::optim::AdamParamState*>(&param_state)) {
+        // Standard Adam
+        adam_state->exp_avg().index_put_({sampled_indices}, 0);
+        adam_state->exp_avg_sq().index_put_({sampled_indices}, 0);
+
+        if (adam_state->max_exp_avg_sq().defined()) {
+            adam_state->max_exp_avg_sq().index_put_({sampled_indices}, 0);
+        }
+    } else if (auto* selective_adam_state = dynamic_cast<gs::SelectiveAdam::AdamParamState*>(&param_state)) {
+        // SelectiveAdam
+        selective_adam_state->exp_avg.index_put_({sampled_indices}, 0);
+        selective_adam_state->exp_avg_sq.index_put_({sampled_indices}, 0);
+
+        if (selective_adam_state->max_exp_avg_sq.defined()) {
+            selective_adam_state->max_exp_avg_sq.index_put_({sampled_indices}, 0);
+        }
+    }
 }
 
+int NewtonStrategy::relocate_gs() {
+    // Get opacities and handle both [N] and [N, 1] shapes
+    torch::NoGradGuard no_grad;
+    auto opacities = _splat_data.get_opacity();
+    if (opacities.dim() == 2 && opacities.size(1) == 1) {
+        opacities = opacities.squeeze(-1);
+    }
+
+    auto dead_mask = opacities <= _params->min_opacity;
+    auto dead_indices = dead_mask.nonzero().squeeze(-1);
+    int n_dead = dead_indices.numel();
+
+    if (n_dead == 0)
+        return 0;
+
+    auto alive_mask = ~dead_mask;
+    auto alive_indices = alive_mask.nonzero().squeeze(-1);
+
+    if (alive_indices.numel() == 0)
+        return 0;
+
+    // Sample from alive Gaussians based on opacity
+    auto probs = opacities.index_select(0, alive_indices);
+    auto sampled_idxs_local = multinomial_sample(probs, n_dead, true);
+    auto sampled_idxs = alive_indices.index_select(0, sampled_idxs_local);
+
+    // Get parameters for sampled Gaussians
+    auto sampled_opacities = opacities.index_select(0, sampled_idxs);
+    auto sampled_scales = _splat_data.get_scaling().index_select(0, sampled_idxs);
+
+    // Count occurrences of each sampled index
+    auto ratios = torch::zeros({opacities.size(0)}, torch::kFloat32).to(torch::kCUDA);
+    ratios.index_add_(0, sampled_idxs, torch::ones_like(sampled_idxs, torch::kFloat32));
+    ratios = ratios.index_select(0, sampled_idxs) + 1;
+
+    // IMPORTANT: Clamp and convert to int as in Python implementation
+    const int n_max = static_cast<int>(_binoms.size(0));
+    ratios = torch::clamp(ratios, 1, n_max);
+    ratios = ratios.to(torch::kInt32).contiguous(); // Convert to int!
+
+    // Call the CUDA relocation function from gsplat
+    auto relocation_result = gsplat::relocation(
+        sampled_opacities,
+        sampled_scales,
+        ratios,
+        _binoms,
+        n_max);
+
+    auto new_opacities = std::get<0>(relocation_result);
+    auto new_scales = std::get<1>(relocation_result);
+
+    // Clamp new opacities
+    new_opacities = torch::clamp(new_opacities, _params->min_opacity, 1.0f - 1e-7f);
+
+    // Update parameters for sampled indices
+    // Handle opacity shape properly
+    if (_splat_data.opacity_raw().dim() == 2) {
+        _splat_data.opacity_raw().index_put_({sampled_idxs, torch::indexing::Slice()},
+                                             torch::logit(new_opacities).unsqueeze(-1));
+    } else {
+        _splat_data.opacity_raw().index_put_({sampled_idxs}, torch::logit(new_opacities));
+    }
+    _splat_data.scaling_raw().index_put_({sampled_idxs}, torch::log(new_scales));
+
+    // Copy from sampled to dead indices
+    _splat_data.means().index_put_({dead_indices}, _splat_data.means().index_select(0, sampled_idxs));
+    _splat_data.sh0().index_put_({dead_indices}, _splat_data.sh0().index_select(0, sampled_idxs));
+    _splat_data.shN().index_put_({dead_indices}, _splat_data.shN().index_select(0, sampled_idxs));
+    _splat_data.scaling_raw().index_put_({dead_indices}, _splat_data.scaling_raw().index_select(0, sampled_idxs));
+    _splat_data.rotation_raw().index_put_({dead_indices}, _splat_data.rotation_raw().index_select(0, sampled_idxs));
+    _splat_data.opacity_raw().index_put_({dead_indices}, _splat_data.opacity_raw().index_select(0, sampled_idxs));
+
+    // Update optimizer states for sampled indices
+    for (int i = 0; i < 6; ++i) {
+        update_optimizer_for_relocate(_optimizer.get(), sampled_idxs, dead_indices, i);
+    }
+
+    return n_dead;
+}
+
+int NewtonStrategy::add_new_gs() {
+    // Add this check at the beginning
+    torch::NoGradGuard no_grad;
+    if (!_optimizer) {
+        std::cerr << "Warning: add_new_gs called but optimizer not initialized" << std::endl;
+        return 0;
+    }
+
+    const int current_n = _splat_data.size();
+    const int n_target = std::min(_params->max_cap, static_cast<int>(1.05f * current_n));
+    const int n_new = std::max(0, n_target - current_n);
+
+    if (n_new == 0)
+        return 0;
+
+    // Get opacities and handle both [N] and [N, 1] shapes
+    auto opacities = _splat_data.get_opacity();
+    if (opacities.dim() == 2 && opacities.size(1) == 1) {
+        opacities = opacities.squeeze(-1);
+    }
+
+    auto probs = opacities.flatten();
+    auto sampled_idxs = multinomial_sample(probs, n_new, true);
+
+    // Get parameters for sampled Gaussians
+    auto sampled_opacities = opacities.index_select(0, sampled_idxs);
+    auto sampled_scales = _splat_data.get_scaling().index_select(0, sampled_idxs);
+
+    // Count occurrences
+    auto ratios = torch::zeros({opacities.size(0)}, torch::kFloat32).to(torch::kCUDA);
+    ratios.index_add_(0, sampled_idxs, torch::ones_like(sampled_idxs, torch::kFloat32));
+    ratios = ratios.index_select(0, sampled_idxs) + 1;
+
+    // IMPORTANT: Clamp and convert to int as in Python implementation
+    const int n_max = static_cast<int>(_binoms.size(0));
+    ratios = torch::clamp(ratios, 1, n_max);
+    ratios = ratios.to(torch::kInt32).contiguous(); // Convert to int!
+
+    // Call the CUDA relocation function from gsplat
+    auto relocation_result = gsplat::relocation(
+        sampled_opacities,
+        sampled_scales,
+        ratios,
+        _binoms,
+        n_max);
+
+    auto new_opacities = std::get<0>(relocation_result);
+    auto new_scales = std::get<1>(relocation_result);
+
+    // Clamp new opacities
+    new_opacities = torch::clamp(new_opacities, _params->min_opacity, 1.0f - 1e-7f);
+
+    // Update existing Gaussians FIRST (before concatenation)
+    if (_splat_data.opacity_raw().dim() == 2) {
+        _splat_data.opacity_raw().index_put_({sampled_idxs, torch::indexing::Slice()},
+                                             torch::logit(new_opacities).unsqueeze(-1));
+    } else {
+        _splat_data.opacity_raw().index_put_({sampled_idxs}, torch::logit(new_opacities));
+    }
+    _splat_data.scaling_raw().index_put_({sampled_idxs}, torch::log(new_scales));
+
+    // Prepare new Gaussians to concatenate
+    auto new_means = _splat_data.means().index_select(0, sampled_idxs);
+    auto new_sh0 = _splat_data.sh0().index_select(0, sampled_idxs);
+    auto new_shN = _splat_data.shN().index_select(0, sampled_idxs);
+    auto new_scaling = _splat_data.scaling_raw().index_select(0, sampled_idxs);
+    auto new_rotation = _splat_data.rotation_raw().index_select(0, sampled_idxs);
+    auto new_opacity = _splat_data.opacity_raw().index_select(0, sampled_idxs);
+
+    // Step 1: Concatenate all parameters
+    auto concat_means = torch::cat({_splat_data.means(), new_means}, 0).set_requires_grad(true);
+    auto concat_sh0 = torch::cat({_splat_data.sh0(), new_sh0}, 0).set_requires_grad(true);
+    auto concat_shN = torch::cat({_splat_data.shN(), new_shN}, 0).set_requires_grad(true);
+    auto concat_scaling = torch::cat({_splat_data.scaling_raw(), new_scaling}, 0).set_requires_grad(true);
+    auto concat_rotation = torch::cat({_splat_data.rotation_raw(), new_rotation}, 0).set_requires_grad(true);
+    auto concat_opacity = torch::cat({_splat_data.opacity_raw(), new_opacity}, 0).set_requires_grad(true);
+
+    // Step 2: SAFER optimizer state update
+    // Store the new parameters in a temporary array first
+    std::array<torch::Tensor*, 6> new_params = {
+        &concat_means, &concat_sh0, &concat_shN,
+        &concat_scaling, &concat_rotation, &concat_opacity};
+
+    // Collect old parameter keys and states
+    std::vector<void*> old_param_keys;
+    std::vector<std::unique_ptr<torch::optim::OptimizerParamState>> saved_states;
+
+    for (int i = 0; i < 6; ++i) {
+        auto& old_param = _optimizer->param_groups()[i].params()[0];
+        void* old_param_key = old_param.unsafeGetTensorImpl();
+        old_param_keys.push_back(old_param_key);
+
+        // Check if state exists
+        auto state_it = _optimizer->state().find(old_param_key);
+        if (state_it != _optimizer->state().end()) {
+            // Clone the state before modifying - handle both optimizer types
+            if (auto* adam_state = dynamic_cast<torch::optim::AdamParamState*>(state_it->second.get())) {
+                // Standard Adam state
+                torch::IntArrayRef new_shape;
+                if (i == 0)
+                    new_shape = new_means.sizes();
+                else if (i == 1)
+                    new_shape = new_sh0.sizes();
+                else if (i == 2)
+                    new_shape = new_shN.sizes();
+                else if (i == 3)
+                    new_shape = new_scaling.sizes();
+                else if (i == 4)
+                    new_shape = new_rotation.sizes();
+                else
+                    new_shape = new_opacity.sizes();
+
+                auto zeros_to_add = torch::zeros(new_shape, adam_state->exp_avg().options());
+                auto new_exp_avg = torch::cat({adam_state->exp_avg(), zeros_to_add}, 0);
+                auto new_exp_avg_sq = torch::cat({adam_state->exp_avg_sq(), zeros_to_add}, 0);
+
+                // Create new state
+                auto new_state = std::make_unique<torch::optim::AdamParamState>();
+                new_state->step(adam_state->step());
+                new_state->exp_avg(new_exp_avg);
+                new_state->exp_avg_sq(new_exp_avg_sq);
+                if (adam_state->max_exp_avg_sq().defined()) {
+                    auto new_max_exp_avg_sq = torch::cat({adam_state->max_exp_avg_sq(), zeros_to_add}, 0);
+                    new_state->max_exp_avg_sq(new_max_exp_avg_sq);
+                }
+
+                saved_states.push_back(std::move(new_state));
+            } else if (auto* selective_adam_state = dynamic_cast<gs::SelectiveAdam::AdamParamState*>(state_it->second.get())) {
+                // SelectiveAdam state
+                torch::IntArrayRef new_shape;
+                if (i == 0)
+                    new_shape = new_means.sizes();
+                else if (i == 1)
+                    new_shape = new_sh0.sizes();
+                else if (i == 2)
+                    new_shape = new_shN.sizes();
+                else if (i == 3)
+                    new_shape = new_scaling.sizes();
+                else if (i == 4)
+                    new_shape = new_rotation.sizes();
+                else
+                    new_shape = new_opacity.sizes();
+
+                auto zeros_to_add = torch::zeros(new_shape, selective_adam_state->exp_avg.options());
+                auto new_exp_avg = torch::cat({selective_adam_state->exp_avg, zeros_to_add}, 0);
+                auto new_exp_avg_sq = torch::cat({selective_adam_state->exp_avg_sq, zeros_to_add}, 0);
+
+                // Create new state
+                auto new_state = std::make_unique<gs::SelectiveAdam::AdamParamState>();
+                new_state->step_count = selective_adam_state->step_count;
+                new_state->exp_avg = new_exp_avg;
+                new_state->exp_avg_sq = new_exp_avg_sq;
+                if (selective_adam_state->max_exp_avg_sq.defined()) {
+                    auto new_max_exp_avg_sq = torch::cat({selective_adam_state->max_exp_avg_sq, zeros_to_add}, 0);
+                    new_state->max_exp_avg_sq = new_max_exp_avg_sq;
+                }
+
+                saved_states.push_back(std::move(new_state));
+            } else {
+                saved_states.push_back(nullptr);
+            }
+        } else {
+            saved_states.push_back(nullptr);
+        }
+    }
+
+    // Now remove all old states
+    for (auto key : old_param_keys) {
+        _optimizer->state().erase(key);
+    }
+
+    // Update parameters and add new states
+    for (int i = 0; i < 6; ++i) {
+        _optimizer->param_groups()[i].params()[0] = *new_params[i];
+
+        if (saved_states[i]) {
+            void* new_param_key = new_params[i]->unsafeGetTensorImpl();
+            _optimizer->state()[new_param_key] = std::move(saved_states[i]);
+        }
+    }
+
+    // Step 3: Finally update the model's parameters
+    _splat_data.means() = concat_means;
+    _splat_data.sh0() = concat_sh0;
+    _splat_data.shN() = concat_shN;
+    _splat_data.scaling_raw() = concat_scaling;
+    _splat_data.rotation_raw() = concat_rotation;
+    _splat_data.opacity_raw() = concat_opacity;
+
+    return n_new;
+}
+
+void NewtonStrategy::inject_noise() {
+    // Get opacities and handle both [N] and [N, 1] shapes
+    torch::NoGradGuard no_grad;
+
+    auto opacities = _splat_data.get_opacity();
+    if (opacities.dim() == 2 && opacities.size(1) == 1) {
+        opacities = opacities.squeeze(-1);
+    }
+
+    auto scales = _splat_data.get_scaling();
+    auto quats = _splat_data.get_rotation();
+
+    // Use gsplat's quat_scale_to_covar_preci function
+    auto covar_result = gsplat::quat_scale_to_covar_preci_fwd(
+        quats,
+        scales,
+        true,  // compute_covar
+        false, // compute_preci
+        false  // triu
+    );
+    auto covars = std::get<0>(covar_result); // [N, 3, 3]
+
+    // Opacity sigmoid function: 1 / (1 + exp(-k * (x - x0)))
+    const float k = 100.0f;
+    const float x0 = 0.995f;
+    auto op_sigmoid = 1.0f / (1.0f + torch::exp(-k * ((1.0f - opacities) - x0)));
+
+    // Get current learning rate from optimizer (after scheduler has updated it)
+    float current_lr = 0.0f;
+    auto& group = _optimizer->param_groups()[0];
+    if (auto* adam_options = dynamic_cast<torch::optim::AdamOptions*>(&group.options())) {
+        current_lr = static_cast<float>(adam_options->lr());
+    } else if (auto* selective_adam_options = dynamic_cast<gs::SelectiveAdam::Options*>(&group.options())) {
+        current_lr = static_cast<float>(selective_adam_options->lr());
+    }
+
+    // Generate noise
+    auto noise = torch::randn_like(_splat_data.means()) * op_sigmoid.unsqueeze(-1) * current_lr * _noise_lr;
+
+    // Transform noise by covariance
+    noise = torch::bmm(covars, noise.unsqueeze(-1)).squeeze(-1);
+
+    // Add noise to positions
+    _splat_data.means().add_(noise);
+}
 
 void NewtonStrategy::post_backward(int iter, gs::RenderOutput& render_output) {
-    // This method is called by Trainer after loss.backward()
-    // Cache necessary data for the NewtonOptimizer::step() call
-    current_iter_ = iter;
-    current_render_output_cache_ = render_output; // This is a shallow copy of Tensors if RenderOutput holds Tensors directly
-
-    // Compute and cache the full visibility mask.
-    // This is where the 'ranks' tensor from gsplat projection would be essential.
-    // Since RenderOutput doesn't expose it, this will be a placeholder.
-    compute_visibility_mask_for_model(render_output, *splat_data_);
-
-    // Capture gradients from autograd
-    // Ensure that tensors exist and have gradients. Clone to be safe.
-    if (splat_data_->means().grad().defined()) {
-        autograd_grad_means_ = splat_data_->means().grad().clone();
-    } else {
-        // Create a zero tensor of the same shape if grad is not defined.
-        // This might happen if a parameter isn't part of the computation graph leading to the loss.
-        std::cerr << "Warning: NewtonStrategy::post_backward - splat_data_->means().grad() is not defined. Using zeros." << std::endl;
-        autograd_grad_means_ = torch::zeros_like(splat_data_->means());
+    // Store visibility mask for selective adam
+    if (_params->selective_adam) {
+        _last_visibility_mask = render_output.visibility;
     }
 
-    // TODO: Capture gradients for other parameters (scales, rotations, opacities, shs)
-    // For now, creating zero tensors as placeholders if they are needed by NewtonOptimizer::step
-    // This assumes NewtonOptimizer::step will be modified to take all these grads.
-    // If a parameter is not optimized by Newton, its grad might not be needed.
-    if (optim_params_cache_.newton_optimize_scales && splat_data_->scaling_raw().grad().defined()) {
-         autograd_grad_scales_raw_ = splat_data_->scaling_raw().grad().clone();
-    } else if (optim_params_cache_.newton_optimize_scales) {
-        std::cerr << "Warning: NewtonStrategy::post_backward - splat_data_->scaling_raw().grad() is not defined while newton_optimize_scales is true. Using zeros." << std::endl;
-        autograd_grad_scales_raw_ = torch::zeros_like(splat_data_->scaling_raw());
+    // Increment SH degree every 1000 iterations
+    torch::NoGradGuard no_grad;
+    if (iter % _params->sh_degree_interval == 0) {
+        _splat_data.increment_sh_degree();
     }
 
-    if (optim_params_cache_.newton_optimize_rotations && splat_data_->rotation_raw().grad().defined()) {
-        autograd_grad_rotation_raw_ = splat_data_->rotation_raw().grad().clone();
-    } else if (optim_params_cache_.newton_optimize_rotations) {
-        std::cerr << "Warning: NewtonStrategy::post_backward - splat_data_->rotation_raw().grad() is not defined while newton_optimize_rotations is true. Using zeros." << std::endl;
-        autograd_grad_rotation_raw_ = torch::zeros_like(splat_data_->rotation_raw());
+    // Refine Gaussians
+    if (is_refining(iter)) {
+        // Relocate dead Gaussians
+        relocate_gs();
+
+        // Add new Gaussians
+        add_new_gs();
+
+        c10::cuda::CUDACachingAllocator::emptyCache();
     }
 
-    if (optim_params_cache_.newton_optimize_opacities && splat_data_->opacity_raw().grad().defined()) {
-        autograd_grad_opacity_raw_ = splat_data_->opacity_raw().grad().clone();
-    } else if (optim_params_cache_.newton_optimize_opacities) {
-        std::cerr << "Warning: NewtonStrategy::post_backward - splat_data_->opacity_raw().grad() is not defined while newton_optimize_opacities is true. Using zeros." << std::endl;
-        autograd_grad_opacity_raw_ = torch::zeros_like(splat_data_->opacity_raw());
-    }
-
-    if (optim_params_cache_.newton_optimize_shs && splat_data_->sh0().grad().defined() && splat_data_->shN().grad().defined()) {
-        autograd_grad_sh0_ = splat_data_->sh0().grad().clone();
-        autograd_grad_shN_ = splat_data_->shN().grad().clone();
-    } else if (optim_params_cache_.newton_optimize_shs) {
-         std::cerr << "Warning: NewtonStrategy::post_backward - SH grads not defined while newton_optimize_shs is true. Using zeros." << std::endl;
-        if (!autograd_grad_sh0_.defined() || autograd_grad_sh0_.numel() == 0) autograd_grad_sh0_ = torch::zeros_like(splat_data_->sh0());
-        if (!autograd_grad_shN_.defined() || autograd_grad_shN_.numel() == 0) autograd_grad_shN_ = torch::zeros_like(splat_data_->shN());
-    }
+    // Inject noise to positions
+    inject_noise();
 }
 
 void NewtonStrategy::step(int iter) {
-    if (!optimizer_ || !optim_params_cache_.use_newton_optimizer) {
-        TORCH_CHECK(false, "NewtonStrategy::step called without optimizer or when not enabled.");
-        return;
+    if (iter < _params->iterations) {
+        if (_params->selective_adam && _last_visibility_mask.defined()) {
+            auto* selective_adam = dynamic_cast<gs::SelectiveAdam*>(_optimizer.get());
+            if (selective_adam) {
+                selective_adam->step(_last_visibility_mask);
+            } else {
+                _optimizer->step();
+            }
+        } else {
+            _optimizer->step();
+        }
+        _optimizer->zero_grad(true);
+        _scheduler->step();
     }
-    if (!current_primary_camera_ || !current_primary_gt_image_.defined()) {
-         TORCH_CHECK(false, "NewtonStrategy::step called without primary camera/GT image. Call set_current_view_data first.");
-        return;
+}
+
+void NewtonStrategy::initialize(const gs::param::OptimizationParameters& optimParams) {
+    _params = std::make_unique<const gs::param::OptimizationParameters>(optimParams);
+
+    const auto dev = torch::kCUDA;
+    _splat_data.means() = _splat_data.means().to(dev).set_requires_grad(true);
+    _splat_data.scaling_raw() = _splat_data.scaling_raw().to(dev).set_requires_grad(true);
+    _splat_data.rotation_raw() = _splat_data.rotation_raw().to(dev).set_requires_grad(true);
+    _splat_data.opacity_raw() = _splat_data.opacity_raw().to(dev).set_requires_grad(true);
+    _splat_data.sh0() = _splat_data.sh0().to(dev).set_requires_grad(true);
+    _splat_data.shN() = _splat_data.shN().to(dev).set_requires_grad(true);
+
+    // Initialize binomial coefficients
+    const int n_max = 51;
+    _binoms = torch::zeros({n_max, n_max}, torch::kFloat32);
+    auto binoms_accessor = _binoms.accessor<float, 2>();
+    for (int n = 0; n < n_max; ++n) {
+        for (int k = 0; k <= n; ++k) {
+            // Compute binomial coefficient C(n,k)
+            float binom = 1.0f;
+            for (int i = 0; i < k; ++i) {
+                binom *= static_cast<float>(n - i) / static_cast<float>(i + 1);
+            }
+            binoms_accessor[n][k] = binom;
+        }
+    }
+    _binoms = _binoms.to(dev);
+
+    // Initialize optimizer
+
+    if (_params->selective_adam) {
+        std::cout << "Using SelectiveAdam optimizer" << std::endl;
+
+        using Options = gs::SelectiveAdam::Options;
+        std::vector<torch::optim::OptimizerParamGroup> groups;
+
+        // Create groups with proper unique_ptr<Options>
+        auto add_param_group = [&groups](const torch::Tensor& param, double lr) {
+            auto options = std::make_unique<Options>(lr);
+            options->eps(1e-15).betas(std::make_tuple(0.9, 0.999));
+            groups.emplace_back(
+                std::vector<torch::Tensor>{param},
+                std::unique_ptr<torch::optim::OptimizerOptions>(std::move(options)));
+        };
+
+        add_param_group(_splat_data.means(), _params->means_lr * _splat_data.get_scene_scale());
+        add_param_group(_splat_data.sh0(), _params->shs_lr);
+        add_param_group(_splat_data.shN(), _params->shs_lr / 20.f);
+        add_param_group(_splat_data.scaling_raw(), _params->scaling_lr);
+        add_param_group(_splat_data.rotation_raw(), _params->rotation_lr);
+        add_param_group(_splat_data.opacity_raw(), _params->opacity_lr);
+
+        auto global_options = std::make_unique<Options>(0.f);
+        global_options->eps(1e-15);
+        _optimizer = std::make_unique<gs::SelectiveAdam>(std::move(groups), std::move(global_options));
+    } else {
+        using torch::optim::AdamOptions;
+        std::vector<torch::optim::OptimizerParamGroup> groups;
+
+        // Calculate initial learning rate for position
+        groups.emplace_back(torch::optim::OptimizerParamGroup({_splat_data.means()},
+                                                              std::make_unique<AdamOptions>(_params->means_lr * _splat_data.get_scene_scale())));
+        groups.emplace_back(torch::optim::OptimizerParamGroup({_splat_data.sh0()},
+                                                              std::make_unique<AdamOptions>(_params->shs_lr)));
+        groups.emplace_back(torch::optim::OptimizerParamGroup({_splat_data.shN()},
+                                                              std::make_unique<AdamOptions>(_params->shs_lr / 20.f)));
+        groups.emplace_back(torch::optim::OptimizerParamGroup({_splat_data.scaling_raw()},
+                                                              std::make_unique<AdamOptions>(_params->scaling_lr)));
+        groups.emplace_back(torch::optim::OptimizerParamGroup({_splat_data.rotation_raw()},
+                                                              std::make_unique<AdamOptions>(_params->rotation_lr)));
+        groups.emplace_back(torch::optim::OptimizerParamGroup({_splat_data.opacity_raw()},
+                                                              std::make_unique<AdamOptions>(_params->opacity_lr)));
+
+        for (auto& g : groups)
+            static_cast<AdamOptions&>(g.options()).eps(1e-15);
+
+        _optimizer = std::make_unique<torch::optim::Adam>(groups, AdamOptions(0.f).eps(1e-15));
     }
 
-    // Ensure autograd_grad_means_ is defined before passing
-    if (!autograd_grad_means_.defined()) {
-        TORCH_CHECK(false, "NewtonStrategy::step - autograd_grad_means_ is not defined. Ensure post_backward was called after loss.backward().");
-        // Or, alternatively, provide a zero tensor if this case should be handled gracefully,
-        // though it indicates a logical error in the training loop.
-        // autograd_grad_means_ = torch::zeros_like(splat_data_->means());
-    }
-    // Ensure all necessary autograd gradients are defined before passing
-    TORCH_CHECK(autograd_grad_means_.defined(), "NewtonStrategy::step - autograd_grad_means_ is not defined.");
-    TORCH_CHECK(autograd_grad_scales_raw_.defined(), "NewtonStrategy::step - autograd_grad_scales_raw_ is not defined.");
-    TORCH_CHECK(autograd_grad_rotation_raw_.defined(), "NewtonStrategy::step - autograd_grad_rotation_raw_ is not defined.");
-    TORCH_CHECK(autograd_grad_opacity_raw_.defined(), "NewtonStrategy::step - autograd_grad_opacity_raw_ is not defined.");
-    TORCH_CHECK(autograd_grad_sh0_.defined(), "NewtonStrategy::step - autograd_grad_sh0_ is not defined.");
-    TORCH_CHECK(autograd_grad_shN_.defined(), "NewtonStrategy::step - autograd_grad_shN_ is not defined.");
-
-    optimizer_->step(
-        iter,
-        current_visibility_mask_for_model_,
-        autograd_grad_means_,
-        autograd_grad_scales_raw_,
-        autograd_grad_rotation_raw_,
-        autograd_grad_opacity_raw_,
-        autograd_grad_sh0_,
-        autograd_grad_shN_,
-        current_render_output_cache_,
-        *current_primary_camera_,
-        current_primary_gt_image_,
-        current_knn_targets_gpu_
-    );
+    // Initialize exponential scheduler
+    // Python: gamma = 0.01^(1/max_steps)
+    // This means after max_steps, lr will be 0.01 * initial_lr
+    const double gamma = std::pow(0.01, 1.0 / _params->iterations);
+    _scheduler = std::make_unique<ExponentialLR>(*_optimizer, gamma, 0);
 }
 
 bool NewtonStrategy::is_refining(int iter) const {
-    // Basic refinement logic, can be adapted from standard 3DGS
-    if (optim_params_cache_.refine_every > 0 && iter % optim_params_cache_.refine_every == 0) {
-        return iter >= optim_params_cache_.start_refine && iter <= optim_params_cache_.stop_refine;
-    }
-    return false;
+    return (iter < _params->stop_refine &&
+            iter > _params->start_refine &&
+            iter % _params->refine_every == 0);
 }
 
-void NewtonStrategy::set_current_view_data(
-    const Camera* primary_camera,
-    const torch::Tensor& primary_gt_image,
-    const gs::RenderOutput& render_output,
-    const gs::param::OptimizationParameters& opt_params,
-    int iteration
-) {
-    current_primary_camera_ = primary_camera;
-    current_primary_gt_image_ = primary_gt_image;     // Assumed on device
-    current_render_output_cache_ = render_output;     // Shallow copy of Tensors
-    current_iter_ = iteration;
-    // optim_params_cache_ should already be set by initialize()
-    // Re-assert or update if dynamic changes are possible (unlikely for opt_params during training)
-    // optim_params_cache_ = opt_params;
+std::tuple<std::vector<torch::Tensor>, std::vector<torch::Tensor>, torch::autograd::variable_list>
+NewtonStrategy::loss_backward_and_hvp(const torch::Tensor& loss) {
+    // 1. Parameter Setup
+    // Ensure parameters require gradients if they don't already.
+    // The SplatData members should already be set up with requires_grad(true)
+    // during initialization if they are optimizable.
+    _splat_data.means().set_requires_grad(true);
+    _splat_data.rotation_raw().set_requires_grad(true);
+    _splat_data.scaling_raw().set_requires_grad(true);
+    _splat_data.opacity_raw().set_requires_grad(true);
+    _splat_data.shN().set_requires_grad(true); // Assuming shN is a direct tensor
+    _splat_data.sh0().set_requires_grad(true); // Assuming sh0 is a direct tensor
 
-    compute_visibility_mask_for_model(render_output, *splat_data_);
+    torch::autograd::variable_list params = {
+        _splat_data.means(),
+        _splat_data.rotation_raw(),
+        _splat_data.scaling_raw(),
+        _splat_data.opacity_raw(),
+        _splat_data.shN(), // Make sure these are the correct direct tensors
+        _splat_data.sh0()
+    };
 
-    if (optim_params_cache_.use_newton_optimizer && optim_params_cache_.newton_knn_k > 0) {
-        find_knn_for_current_primary(primary_camera);
-    } else {
-        current_knn_targets_gpu_.clear();
-    }
-}
-
-
-void NewtonStrategy::cache_camera_references() {
-    if (!train_dataset_ref_ || train_dataset_ref_->size().value_or(0) == 0) {
-        std::cerr << "Warning: NewtonStrategy::cache_camera_references skipped: no training dataset provided." << std::endl;
-        return;
-    }
-    if (!uid_to_camera_cache_.empty()){
-        return; // Already initialized
-    }
-
-    uid_to_camera_cache_.clear();
-    const auto& cameras_from_dataset = train_dataset_ref_->get_cameras();
-    if (cameras_from_dataset.empty()) {
-         std::cerr << "Warning: NewtonStrategy::cache_camera_references skipped: training dataset has no cameras." << std::endl;
-        return;
-    }
-
-    for (const auto& cam_shared_ptr : cameras_from_dataset) {
-        if (cam_shared_ptr) {
-            uid_to_camera_cache_[cam_shared_ptr->uid()] = cam_shared_ptr.get();
-        }
-    }
-    std::cout << "NewtonStrategy: Cached " << uid_to_camera_cache_.size() << " camera references." << std::endl;
-}
-
-void NewtonStrategy::find_knn_for_current_primary(const Camera* primary_cam_in) {
-    current_knn_targets_gpu_.clear();
-    if (!splat_data_ || !primary_cam_in) {
-        TORCH_CHECK(false, "NewtonStrategy::find_knn_for_current_primary: SplatData or primary_cam_in is null.");
-        return;
-    }
-    // K for KNN (number of secondary views) is determined by the precomputed KNNs in SplatData.
-    // optim_params_cache_.newton_knn_k is for NewtonOptimizer's internal use (e.g. Hessian neighborhood), not for this.
-
-    const std::vector<int>& neighbor_uids = splat_data_->get_knns_for_camera_uid(primary_cam_in->uid());
-
-    if (neighbor_uids.empty()) {
-        // No precomputed KNNs for this camera, or K was 0 during precomputation.
-        return;
-    }
-
-    current_knn_targets_gpu_.reserve(neighbor_uids.size());
-
-    for (int neighbor_uid : neighbor_uids) {
-        if (neighbor_uid == primary_cam_in->uid()) continue; // Skip self
-
-        auto it = uid_to_camera_cache_.find(neighbor_uid);
-        if (it == uid_to_camera_cache_.end()) {
-            std::cerr << "Warning: NewtonStrategy: KNN UID " << neighbor_uid
-                      << " not found in cached camera references. Skipping." << std::endl;
+    // User-provided parameter debug print loop
+    for (size_t i = 0; i < params.size(); ++i) {
+        auto& p = params[i];
+        if (!p.defined()) {
+            std::cout << "Param " << i << " is not defined!" << std::endl;
             continue;
         }
-        const Camera* secondary_cam = it->second;
+        std::cout << "Param " << i
+                  << ": requires_grad=" << p.requires_grad()
+                  << ", is_leaf=" << p.is_leaf()
+                  << ", defined=" << p.defined()
+                  << ", sizes=" << p.sizes()
+                  << std::endl;
+    }
 
-        // Load GT image for this secondary_cam
-        // This assumes Camera has a method to load its image.
-        // We need to determine the target resolution for secondary GT images.
-        int target_height = static_cast<int>(secondary_cam->image_height() * optim_params_cache_.newton_secondary_target_downsample_factor);
-        int target_width = static_cast<int>(secondary_cam->image_width() * optim_params_cache_.newton_secondary_target_downsample_factor);
+    // 2. Gradient Calculation
+    // create_graph=true is crucial for HVP. allow_unused=true is good practice.
+    std::vector<torch::Tensor> grads = torch::autograd::grad(
+        {loss},
+        params,
+        /*grad_outputs=*/{},
+        /*retain_graph=*/std::nullopt, // Typically false or null for HVP's first grad, but true if graph needed later beyond HVP
+        /*create_graph=*/true,      // MUST BE TRUE for HVP
+        /*allow_unused=*/true);
 
-        // Create a temporary camera with new dimensions for loading if resolution param in load_and_get_image is not enough
-        // Or, assume load_and_get_image handles downsampling if resolution is different from native.
-        // For now, let's assume load_and_get_image can take a target resolution, or we post-process.
-        // The Camera class provided doesn't show a way to change its internal H/W for loading.
-        // So, we load full and then downsample.
+    std::vector<torch::Tensor> hvp_result;
 
-        torch::Tensor secondary_gt_cpu = const_cast<Camera*>(secondary_cam)->load_and_get_image(); // Load full res CPU
+    // 3. HVP Calculation
+    if (!grads.empty() && std::all_of(grads.begin(), grads.end(), [](const torch::Tensor& t){ return t.defined(); })) {
+        std::vector<torch::Tensor> v_for_hvp;
+        v_for_hvp.reserve(grads.size());
+        bool all_grads_defined_for_hvp = true;
+        for (const auto& grad_tensor : grads) {
+            if (grad_tensor.defined()) {
+                v_for_hvp.push_back(grad_tensor.detach());
+            } else {
+                // This case should ideally not be hit if allow_unused=false in first grad,
+                // or if all params contribute to loss. With allow_unused=true, it's possible.
+                // For HVP, if a grad is undefined, its contribution to dot product is zero,
+                // but the second grad call might error if param list expects a tensor.
+                // Adding a zero tensor of appropriate shape might be a robust way,
+                // but requires knowing the shape of the original parameter.
+                // For now, we'll flag and potentially skip HVP if a grad is missing.
+                all_grads_defined_for_hvp = false;
+                std::cerr << "Warning: Undefined gradient encountered when preparing for HVP. Skipping HVP for this tensor." << std::endl;
+                // Push a placeholder or decide how to handle. For safety, we might skip HVP if any grad is undef.
+            }
+        }
 
-        if (secondary_gt_cpu.defined() && secondary_gt_cpu.numel() > 0) {
-             if (optim_params_cache_.newton_secondary_target_downsample_factor < 1.0f &&
-                 optim_params_cache_.newton_secondary_target_downsample_factor > 0.0f) {
-
-                // Ensure it's float and on CPU for interpolate if needed, then permute
-                secondary_gt_cpu = secondary_gt_cpu.to(torch::kFloat32); // Ensure float for interpolate
-                if (secondary_gt_cpu.is_cuda()) secondary_gt_cpu = secondary_gt_cpu.cpu();
-
-                torch::Tensor input_for_interpolate = secondary_gt_cpu.permute({2,0,1}).unsqueeze(0); // HWC to 1CHW
-
-                long new_H = static_cast<long>(secondary_gt_cpu.size(0) * optim_params_cache_.newton_secondary_target_downsample_factor);
-                long new_W = static_cast<long>(secondary_gt_cpu.size(1) * optim_params_cache_.newton_secondary_target_downsample_factor);
-
-                if (new_H > 0 && new_W > 0) {
-                    secondary_gt_cpu = torch::nn::functional::interpolate(
-                        input_for_interpolate,
-                        torch::nn::functional::InterpolateFuncOptions().size(std::vector<int64_t>{static_cast<int64_t>(new_H), static_cast<int64_t>(new_W)}).mode(torch::kArea)
-                    ).squeeze(0).permute({1,2,0}); // 1CHW -> CHW -> HWC
-                } else {
-                    std::cerr << "Warning: KNN downsampled GT image for cam " << secondary_cam->uid()
-                              << " resulted in zero dimension. Original H/W: "
-                              << secondary_gt_cpu.size(0) << "/" << secondary_gt_cpu.size(1)
-                              << ", Factor: " << optim_params_cache_.newton_secondary_target_downsample_factor << std::endl;
-                    continue; // Skip this problematic one
+        // Check if any grad was undefined. If so, HVP calculation might be problematic.
+        // A simple check: if v_for_hvp isn't same size as grads, something went wrong.
+        if (grads.size() != v_for_hvp.size()) {
+             std::cerr << "Warning: Mismatch in defined gradients and v_for_hvp size due to undefined gradients. Skipping HVP computation." << std::endl;
+        } else {
+            torch::Tensor grad_output_dot_v = torch::zeros({}, loss.options()); // scalar
+            for (size_t i = 0; i < grads.size(); ++i) {
+                 // Ensure grads[i] still requires grad for this operation (it should due to create_graph=true).
+                 // v_for_hvp[i] is detached.
+                if (grads[i].defined() && v_for_hvp[i].defined()) { // grads[i] should be checked before pushing to v_for_hvp
+                    grad_output_dot_v += torch::sum(grads[i] * v_for_hvp[i]);
                 }
             }
-            current_knn_targets_gpu_.emplace_back(secondary_cam, secondary_gt_cpu.to(splat_data_->get_means().device())); // Corrected model_ to splat_data_
+
+            hvp_result = torch::autograd::grad(
+                {grad_output_dot_v},
+                params,
+                /*grad_outputs=*/{},
+                /*retain_graph=*/std::nullopt, // Or true if graph needed later
+                /*create_graph=*/false,     // Typically false for the final HVP result
+                /*allow_unused=*/true);
+        }
+
+    } else {
+        std::cerr << "Warning: Gradients vector is empty or contains undefined tensors after first grad call. Skipping HVP computation." << std::endl;
+        // Ensure hvp_result is empty or filled with placeholders if necessary downstream
+        hvp_result.assign(params.size(), torch::Tensor()); // Fill with undefined tensors
+    }
+
+    // 4. Gradient Assignment & Debug Print
+    // User-provided gradient debug print loop
+    for (size_t i = 0; i < grads.size(); ++i) {
+        const auto& grad = grads[i];
+        std::cout << "Grad " << i
+                  << ": defined=" << grad.defined();
+        if (grad.defined()) {
+            std::cout << ", sizes=" << grad.sizes();
+        }
+        std::cout << std::endl;
+    }
+
+    for (size_t i = 0; i < grads.size(); ++i) {
+        if (params[i].defined() && grads[i].defined()) {
+            // Ensure param is a leaf or this won't work as expected,
+            // or that it's part of the list of tensors whose grads are being requested.
+            // Setting .mutable_grad() is generally for leaf tensors part of an optimizer.
+            params[i].mutable_grad() = grads[i];
         } else {
-            std::cerr << "Warning: Could not load GT image for secondary KNN camera UID " << secondary_cam->uid() << std::endl;
+            if (!params[i].defined()) std::cout << "Param " << i << " not defined for grad assignment." << std::endl;
+            if (grads.size() > i && !grads[i].defined()) std::cout << "Grad " << i << " not defined for grad assignment." << std::endl;
         }
     }
+
+    return std::make_tuple(grads, hvp_result, params);
 }

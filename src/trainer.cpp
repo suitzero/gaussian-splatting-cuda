@@ -230,12 +230,26 @@ namespace gs {
 
         current_loss_ = loss.item<float>();
 
-        torch::autograd::variable_list latest_autograd_gradients_,params;
-        if (!params_.optimization.use_newton_optimizer)
+        // Declare variables for gradients, HVP, and parameters from the strategy method
+        torch::autograd::variable_list trainer_params;
+        std::vector<torch::Tensor> trainer_grads;
+        std::vector<torch::Tensor> trainer_hvp_result;
+
+        if (!params_.optimization.use_newton_optimizer) {
 			loss.backward();
-        else {
-            torch::autograd::variable_list params = {strategy_->get_model().get_means(), strategy_->get_model().get_rotation(), strategy_->get_model().get_scaling(), strategy_->get_model().get_opacity(), strategy_->get_model().get_shs()};
-            auto latest_autograd_gradients_ = torch::autograd::grad({loss}, {params}, {}, std::nullopt, true);
+            // Note: If newton optimizer is not used, grads and hvp_result will be empty.
+            // The strategy's step method will handle standard optimizer steps.
+        } else {
+            // Newton optimizer path: call the strategy's method to compute grads and HVP
+            // This method also handles setting .grad on the parameters.
+            auto strategy_outputs = strategy_->loss_backward_and_hvp(loss);
+            trainer_grads = std::get<0>(strategy_outputs);
+            trainer_hvp_result = std::get<1>(strategy_outputs);
+            trainer_params = std::get<2>(strategy_outputs);
+            // Gradients are now also set on the parameters themselves (param.mutable_grad())
+            // The MCMC-based NewtonStrategy does not have a conjugate_gradient_solver method.
+            // The HVP and grads are computed and grads are set, but further use of HVP
+            // would need to be implemented in NewtonStrategy::step or a similar method.
         }
 
         {
@@ -260,18 +274,14 @@ namespace gs {
             }
 
             auto do_strategy = [&]() {
-                // If NewtonStrategy, provide it with necessary per-frame data
-                if (auto* newton_strat = dynamic_cast<NewtonStrategy*>(strategy_.get())) {
-                    newton_strat->conjugate_gradient_solver(params, latest_autograd_gradients_);
-                    newton_strat->set_current_view_data(
-                        cam,
-                        gt_image, // gt_image is already on device if loaded by dataloader correctly
-                        r_output,
-                        params_.optimization, // Pass current opt params
-                        iter
-                    );
-                }
-                // post_backward might still be useful for other strategies, or NewtonStrategy can use it too
+                // The new loss_backward_and_hvp method in NewtonStrategy (MCMC-based) handles
+                // gradient calculation, HVP, and setting .grad on parameters if use_newton_optimizer is true.
+                // The MCMC-based NewtonStrategy does not have conjugate_gradient_solver or set_current_view_data.
+                // Those calls were specific to a different NewtonStrategy structure.
+
+                // These are standard strategy interface calls.
+                // post_backward in the MCMC-based strategy handles refinement and noise injection.
+                // step handles the optimizer step.
                 strategy_->post_backward(iter, r_output);
                 strategy_->step(iter);
             };
