@@ -23,6 +23,10 @@ public:
     SplatData& get_model() override { return _splat_data; }
     const SplatData& get_model() const override { return _splat_data; }
 
+    // Method to compute loss.backward(), gradients, and HVP
+    std::tuple<std::vector<torch::Tensor>, std::vector<torch::Tensor>, torch::autograd::variable_list>
+    loss_backward_and_hvp(const torch::Tensor& loss);
+
 private:
     // Simple ExponentialLR implementation since C++ API is different
     class ExponentialLR {

@@ -572,3 +572,130 @@ bool NewtonStrategy::is_refining(int iter) const {
             iter > _params->start_refine &&
             iter % _params->refine_every == 0);
 }
+
+std::tuple<std::vector<torch::Tensor>, std::vector<torch::Tensor>, torch::autograd::variable_list>
+NewtonStrategy::loss_backward_and_hvp(const torch::Tensor& loss) {
+    // 1. Parameter Setup
+    // Ensure parameters require gradients if they don't already.
+    // The SplatData members should already be set up with requires_grad(true)
+    // during initialization if they are optimizable.
+    _splat_data.means().set_requires_grad(true);
+    _splat_data.rotation_raw().set_requires_grad(true);
+    _splat_data.scaling_raw().set_requires_grad(true);
+    _splat_data.opacity_raw().set_requires_grad(true);
+    _splat_data.shN().set_requires_grad(true); // Assuming shN is a direct tensor
+    _splat_data.sh0().set_requires_grad(true); // Assuming sh0 is a direct tensor
+
+    torch::autograd::variable_list params = {
+        _splat_data.means(),
+        _splat_data.rotation_raw(),
+        _splat_data.scaling_raw(),
+        _splat_data.opacity_raw(),
+        _splat_data.shN(), // Make sure these are the correct direct tensors
+        _splat_data.sh0()
+    };
+
+    // User-provided parameter debug print loop
+    for (size_t i = 0; i < params.size(); ++i) {
+        auto& p = params[i];
+        if (!p.defined()) {
+            std::cout << "Param " << i << " is not defined!" << std::endl;
+            continue;
+        }
+        std::cout << "Param " << i
+                  << ": requires_grad=" << p.requires_grad()
+                  << ", is_leaf=" << p.is_leaf()
+                  << ", defined=" << p.defined()
+                  << ", sizes=" << p.sizes()
+                  << std::endl;
+    }
+
+    // 2. Gradient Calculation
+    // create_graph=true is crucial for HVP. allow_unused=true is good practice.
+    std::vector<torch::Tensor> grads = torch::autograd::grad(
+        {loss},
+        params,
+        /*grad_outputs=*/{},
+        /*retain_graph=*/std::nullopt, // Typically false or null for HVP's first grad, but true if graph needed later beyond HVP
+        /*create_graph=*/true,      // MUST BE TRUE for HVP
+        /*allow_unused=*/true);
+
+    std::vector<torch::Tensor> hvp_result;
+
+    // 3. HVP Calculation
+    if (!grads.empty() && std::all_of(grads.begin(), grads.end(), [](const torch::Tensor& t){ return t.defined(); })) {
+        std::vector<torch::Tensor> v_for_hvp;
+        v_for_hvp.reserve(grads.size());
+        bool all_grads_defined_for_hvp = true;
+        for (const auto& grad_tensor : grads) {
+            if (grad_tensor.defined()) {
+                v_for_hvp.push_back(grad_tensor.detach());
+            } else {
+                // This case should ideally not be hit if allow_unused=false in first grad,
+                // or if all params contribute to loss. With allow_unused=true, it's possible.
+                // For HVP, if a grad is undefined, its contribution to dot product is zero,
+                // but the second grad call might error if param list expects a tensor.
+                // Adding a zero tensor of appropriate shape might be a robust way,
+                // but requires knowing the shape of the original parameter.
+                // For now, we'll flag and potentially skip HVP if a grad is missing.
+                all_grads_defined_for_hvp = false;
+                std::cerr << "Warning: Undefined gradient encountered when preparing for HVP. Skipping HVP for this tensor." << std::endl;
+                // Push a placeholder or decide how to handle. For safety, we might skip HVP if any grad is undef.
+            }
+        }
+
+        // Check if any grad was undefined. If so, HVP calculation might be problematic.
+        // A simple check: if v_for_hvp isn't same size as grads, something went wrong.
+        if (grads.size() != v_for_hvp.size()) {
+             std::cerr << "Warning: Mismatch in defined gradients and v_for_hvp size due to undefined gradients. Skipping HVP computation." << std::endl;
+        } else {
+            torch::Tensor grad_output_dot_v = torch::zeros({}, loss.options()); // scalar
+            for (size_t i = 0; i < grads.size(); ++i) {
+                 // Ensure grads[i] still requires grad for this operation (it should due to create_graph=true).
+                 // v_for_hvp[i] is detached.
+                if (grads[i].defined() && v_for_hvp[i].defined()) { // grads[i] should be checked before pushing to v_for_hvp
+                    grad_output_dot_v += torch::sum(grads[i] * v_for_hvp[i]);
+                }
+            }
+
+            hvp_result = torch::autograd::grad(
+                {grad_output_dot_v},
+                params,
+                /*grad_outputs=*/{},
+                /*retain_graph=*/std::nullopt, // Or true if graph needed later
+                /*create_graph=*/false,     // Typically false for the final HVP result
+                /*allow_unused=*/true);
+        }
+
+    } else {
+        std::cerr << "Warning: Gradients vector is empty or contains undefined tensors after first grad call. Skipping HVP computation." << std::endl;
+        // Ensure hvp_result is empty or filled with placeholders if necessary downstream
+        hvp_result.assign(params.size(), torch::Tensor()); // Fill with undefined tensors
+    }
+
+    // 4. Gradient Assignment & Debug Print
+    // User-provided gradient debug print loop
+    for (size_t i = 0; i < grads.size(); ++i) {
+        const auto& grad = grads[i];
+        std::cout << "Grad " << i
+                  << ": defined=" << grad.defined();
+        if (grad.defined()) {
+            std::cout << ", sizes=" << grad.sizes();
+        }
+        std::cout << std::endl;
+    }
+
+    for (size_t i = 0; i < grads.size(); ++i) {
+        if (params[i].defined() && grads[i].defined()) {
+            // Ensure param is a leaf or this won't work as expected,
+            // or that it's part of the list of tensors whose grads are being requested.
+            // Setting .mutable_grad() is generally for leaf tensors part of an optimizer.
+            params[i].mutable_grad() = grads[i];
+        } else {
+            if (!params[i].defined()) std::cout << "Param " << i << " not defined for grad assignment." << std::endl;
+            if (grads.size() > i && !grads[i].defined()) std::cout << "Grad " << i << " not defined for grad assignment." << std::endl;
+        }
+    }
+
+    return std::make_tuple(grads, hvp_result, params);
+}
