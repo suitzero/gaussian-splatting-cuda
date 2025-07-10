@@ -466,19 +466,52 @@ void NewtonStrategy::post_backward(int iter, gs::RenderOutput& render_output) {
 }
 
 void NewtonStrategy::step(int iter) {
-    if (iter < _params->iterations) {
-        if (_params->selective_adam && _last_visibility_mask.defined()) {
-            auto* selective_adam = dynamic_cast<gs::SelectiveAdam*>(_optimizer.get());
-            if (selective_adam) {
-                selective_adam->step(_last_visibility_mask);
+    if (iter >= _params->iterations) { // Exit if iterations are done
+        return;
+    }
+
+    if (_params && _params->use_newton_optimizer) {
+        // Newton optimizer path
+        std::vector<torch::Tensor> delta_p = conjugate_gradient();
+
+        { // Apply updates with NoGradGuard
+            torch::NoGradGuard no_grad;
+            if (_current_params_list.size() == delta_p.size()) {
+                for (size_t i = 0; i < _current_params_list.size(); ++i) {
+                    if (_current_params_list[i].defined() && delta_p[i].defined()) {
+                        _current_params_list[i].add_(delta_p[i]);
+                    }
+                }
+            } else {
+                std::cerr << "Warning: Mismatch between param list size and delta_p size in NewtonStrategy::step. Skipping update." << std::endl;
+            }
+        }
+
+        if (_optimizer) { // _optimizer is Adam/SelectiveAdam from MCMC base
+            _optimizer->zero_grad(true); // Clear .grad attributes set by loss_backward_and_hvp
+        }
+        if (_scheduler) {
+            _scheduler->step(); // Scheduler might still be used if LR for CG is tied to it, or for other MCMC parts
+        }
+
+    } else {
+        // Standard MCMC/Adam optimizer path (original logic from MCMC code)
+        if (_optimizer) {
+            if (_params && _params->selective_adam && _last_visibility_mask.defined()) {
+                auto* selective_adam = dynamic_cast<gs::SelectiveAdam*>(_optimizer.get());
+                if (selective_adam) {
+                    selective_adam->step(_last_visibility_mask);
+                } else {
+                    _optimizer->step();
+                }
             } else {
                 _optimizer->step();
             }
-        } else {
-            _optimizer->step();
+            _optimizer->zero_grad(true);
         }
-        _optimizer->zero_grad(true);
-        _scheduler->step();
+        if (_scheduler) {
+            _scheduler->step();
+        }
     }
 }
 
@@ -573,8 +606,7 @@ bool NewtonStrategy::is_refining(int iter) const {
             iter % _params->refine_every == 0);
 }
 
-std::tuple<std::vector<torch::Tensor>, std::vector<torch::Tensor>, torch::autograd::variable_list>
-NewtonStrategy::loss_backward_and_hvp(const torch::Tensor& loss) {
+void NewtonStrategy::loss_backward_and_hvp(const torch::Tensor& loss) {
     // 1. Parameter Setup
     // Ensure parameters require gradients if they don't already.
     // The SplatData members should already be set up with requires_grad(true)
@@ -583,21 +615,21 @@ NewtonStrategy::loss_backward_and_hvp(const torch::Tensor& loss) {
     _splat_data.rotation_raw().set_requires_grad(true);
     _splat_data.scaling_raw().set_requires_grad(true);
     _splat_data.opacity_raw().set_requires_grad(true);
-    _splat_data.shN().set_requires_grad(true); // Assuming shN is a direct tensor
-    _splat_data.sh0().set_requires_grad(true); // Assuming sh0 is a direct tensor
+    _splat_data.shN().set_requires_grad(true);
+    _splat_data.sh0().set_requires_grad(true);
 
-    torch::autograd::variable_list params = {
+    _current_params_list = {
         _splat_data.means(),
         _splat_data.rotation_raw(),
         _splat_data.scaling_raw(),
         _splat_data.opacity_raw(),
-        _splat_data.shN(), // Make sure these are the correct direct tensors
+        _splat_data.shN(),
         _splat_data.sh0()
     };
 
     // User-provided parameter debug print loop
-    for (size_t i = 0; i < params.size(); ++i) {
-        auto& p = params[i];
+    for (size_t i = 0; i < _current_params_list.size(); ++i) {
+        auto& p = _current_params_list[i];
         if (!p.defined()) {
             std::cout << "Param " << i << " is not defined!" << std::endl;
             continue;
@@ -611,72 +643,58 @@ NewtonStrategy::loss_backward_and_hvp(const torch::Tensor& loss) {
     }
 
     // 2. Gradient Calculation
-    // create_graph=true is crucial for HVP. allow_unused=true is good practice.
-    std::vector<torch::Tensor> grads = torch::autograd::grad(
+    _current_grads = torch::autograd::grad(
         {loss},
-        params,
+        _current_params_list,
         /*grad_outputs=*/{},
-        /*retain_graph=*/std::nullopt, // Typically false or null for HVP's first grad, but true if graph needed later beyond HVP
-        /*create_graph=*/true,      // MUST BE TRUE for HVP
+        /*retain_graph=*/std::nullopt,
+        /*create_graph=*/true,
         /*allow_unused=*/true);
 
-    std::vector<torch::Tensor> hvp_result;
-
     // 3. HVP Calculation
-    if (!grads.empty() && std::all_of(grads.begin(), grads.end(), [](const torch::Tensor& t){ return t.defined(); })) {
+    // Clear previous HVP result
+    _current_hvp_result.clear();
+    if (!_current_grads.empty() && std::all_of(_current_grads.begin(), _current_grads.end(), [](const torch::Tensor& t){ return t.defined(); })) {
         std::vector<torch::Tensor> v_for_hvp;
-        v_for_hvp.reserve(grads.size());
-        bool all_grads_defined_for_hvp = true;
-        for (const auto& grad_tensor : grads) {
+        v_for_hvp.reserve(_current_grads.size());
+        for (const auto& grad_tensor : _current_grads) {
+            // This check is somewhat redundant due to all_of above, but good for safety
             if (grad_tensor.defined()) {
                 v_for_hvp.push_back(grad_tensor.detach());
             } else {
-                // This case should ideally not be hit if allow_unused=false in first grad,
-                // or if all params contribute to loss. With allow_unused=true, it's possible.
-                // For HVP, if a grad is undefined, its contribution to dot product is zero,
-                // but the second grad call might error if param list expects a tensor.
-                // Adding a zero tensor of appropriate shape might be a robust way,
-                // but requires knowing the shape of the original parameter.
-                // For now, we'll flag and potentially skip HVP if a grad is missing.
-                all_grads_defined_for_hvp = false;
-                std::cerr << "Warning: Undefined gradient encountered when preparing for HVP. Skipping HVP for this tensor." << std::endl;
-                // Push a placeholder or decide how to handle. For safety, we might skip HVP if any grad is undef.
+                // This block should ideally not be reached if all_of passed.
+                // If it were, we'd need robust handling e.g. pushing a zero tensor of correct shape or flagging error.
+                std::cerr << "Error: Undefined gradient encountered unexpectedly in HVP prep." << std::endl;
             }
         }
 
-        // Check if any grad was undefined. If so, HVP calculation might be problematic.
-        // A simple check: if v_for_hvp isn't same size as grads, something went wrong.
-        if (grads.size() != v_for_hvp.size()) {
-             std::cerr << "Warning: Mismatch in defined gradients and v_for_hvp size due to undefined gradients. Skipping HVP computation." << std::endl;
+        if (_current_grads.size() != v_for_hvp.size()) {
+             std::cerr << "Warning: Mismatch in defined gradients and v_for_hvp size. Skipping HVP computation." << std::endl;
+             _current_hvp_result.assign(_current_params_list.size(), torch::Tensor()); // Fill with undefined tensors
         } else {
-            torch::Tensor grad_output_dot_v = torch::zeros({}, loss.options()); // scalar
-            for (size_t i = 0; i < grads.size(); ++i) {
-                 // Ensure grads[i] still requires grad for this operation (it should due to create_graph=true).
-                 // v_for_hvp[i] is detached.
-                if (grads[i].defined() && v_for_hvp[i].defined()) { // grads[i] should be checked before pushing to v_for_hvp
-                    grad_output_dot_v += torch::sum(grads[i] * v_for_hvp[i]);
+            torch::Tensor grad_output_dot_v = torch::zeros({}, loss.options());
+            for (size_t i = 0; i < _current_grads.size(); ++i) {
+                if (_current_grads[i].defined() && v_for_hvp[i].defined()) {
+                    grad_output_dot_v += torch::sum(_current_grads[i] * v_for_hvp[i]);
                 }
             }
 
-            hvp_result = torch::autograd::grad(
+            _current_hvp_result = torch::autograd::grad(
                 {grad_output_dot_v},
-                params,
+                _current_params_list,
                 /*grad_outputs=*/{},
-                /*retain_graph=*/std::nullopt, // Or true if graph needed later
-                /*create_graph=*/false,     // Typically false for the final HVP result
+                /*retain_graph=*/std::nullopt,
+                /*create_graph=*/false,
                 /*allow_unused=*/true);
         }
-
     } else {
         std::cerr << "Warning: Gradients vector is empty or contains undefined tensors after first grad call. Skipping HVP computation." << std::endl;
-        // Ensure hvp_result is empty or filled with placeholders if necessary downstream
-        hvp_result.assign(params.size(), torch::Tensor()); // Fill with undefined tensors
+        _current_hvp_result.assign(_current_params_list.size(), torch::Tensor());
     }
 
     // 4. Gradient Assignment & Debug Print
-    // User-provided gradient debug print loop
-    for (size_t i = 0; i < grads.size(); ++i) {
-        const auto& grad = grads[i];
+    for (size_t i = 0; i < _current_grads.size(); ++i) {
+        const auto& grad = _current_grads[i];
         std::cout << "Grad " << i
                   << ": defined=" << grad.defined();
         if (grad.defined()) {
@@ -685,17 +703,45 @@ NewtonStrategy::loss_backward_and_hvp(const torch::Tensor& loss) {
         std::cout << std::endl;
     }
 
-    for (size_t i = 0; i < grads.size(); ++i) {
-        if (params[i].defined() && grads[i].defined()) {
-            // Ensure param is a leaf or this won't work as expected,
-            // or that it's part of the list of tensors whose grads are being requested.
-            // Setting .mutable_grad() is generally for leaf tensors part of an optimizer.
-            params[i].mutable_grad() = grads[i];
+    for (size_t i = 0; i < _current_grads.size(); ++i) {
+        if (i < _current_params_list.size() && _current_params_list[i].defined() && _current_grads[i].defined()) {
+            _current_params_list[i].mutable_grad() = _current_grads[i];
         } else {
-            if (!params[i].defined()) std::cout << "Param " << i << " not defined for grad assignment." << std::endl;
-            if (grads.size() > i && !grads[i].defined()) std::cout << "Grad " << i << " not defined for grad assignment." << std::endl;
+            if (i >= _current_params_list.size() || !_current_params_list[i].defined()) std::cout << "Param " << i << " not defined for grad assignment." << std::endl;
+            if (!_current_grads[i].defined()) std::cout << "Grad " << i << " not defined for grad assignment." << std::endl;
         }
     }
+    // No return value (void method)
+}
 
-    return std::make_tuple(grads, hvp_result, params);
+std::vector<torch::Tensor> NewtonStrategy::conjugate_gradient() {
+    std::vector<torch::Tensor> delta_params;
+    if (!_current_grads.empty() && _params) {
+        // Use means_lr as a stand-in for a specific Newton learning rate for now
+        // Ensure _params is not null before accessing
+        float learning_rate = static_cast<float>(_params->means_lr);
+
+        delta_params.reserve(_current_grads.size());
+        for (const auto& grad_tensor : _current_grads) {
+            if (grad_tensor.defined()) {
+                delta_params.push_back(-learning_rate * grad_tensor);
+            } else {
+                // Push an undefined tensor if grad was undefined, to maintain size consistency
+                delta_params.push_back(torch::Tensor());
+                std::cerr << "Warning: Undefined gradient encountered in conjugate_gradient placeholder." << std::endl;
+            }
+        }
+    } else {
+        if (_current_grads.empty()) {
+            std::cerr << "Error: _current_grads is empty in conjugate_gradient. Call loss_backward_and_hvp first." << std::endl;
+        }
+        if (!_params) {
+            std::cerr << "Error: _params is null in conjugate_gradient. Initialize strategy first." << std::endl;
+        }
+        // Return an empty vector or a vector of undefined Tensors matching _current_params_list size
+        if(!_current_params_list.empty()){
+            delta_params.assign(_current_params_list.size(), torch::Tensor());
+        }
+    }
+    return delta_params;
 }
