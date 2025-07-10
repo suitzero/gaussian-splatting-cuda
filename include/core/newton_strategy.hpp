@@ -26,7 +26,12 @@ public:
 
     ~NewtonStrategy() override = default;
 
-    void conjugate_gradient_solver(torch::autograd::variable_list params, torch::autograd::variable_list grads){};
+    // Updated signature to accept pre-computed H*g (where g is the gradient)
+    void conjugate_gradient_solver(
+        const torch::autograd::variable_list& params,
+        const std::vector<torch::Tensor>& grads,
+        const std::vector<torch::Tensor>& hvp // Hessian-vector product (H*g)
+    );
 
     void initialize(const gs::param::OptimizationParameters& optimParams) override;
 
@@ -72,6 +77,9 @@ private:
     torch::Tensor autograd_grad_sh0_;
     torch::Tensor autograd_grad_shN_;
     // TODO: Add others if necessary (e.g. if features_direct becomes optimizable)
+
+    // Cached Hessian-Vector Product (H*g) from Trainer
+    std::vector<torch::Tensor> current_hvp_;
 
     // For KNN logic:
     std::shared_ptr<CameraDataset> train_dataset_ref_; // For accessing all camera poses and loading GTs for KNN

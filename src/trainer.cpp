@@ -230,12 +230,78 @@ namespace gs {
 
         current_loss_ = loss.item<float>();
 
-        torch::autograd::variable_list latest_autograd_gradients_,params;
-        if (!params_.optimization.use_newton_optimizer)
+        // Declare variables needed for gradients and HVP in a broader scope
+        torch::autograd::variable_list params_list; // Renamed from 'params' to avoid conflict
+        std::vector<torch::Tensor> gradients; // Will hold latest_autograd_gradients_
+        std::vector<torch::Tensor> hvp_result; // Will hold the Hessian-Vector Product
+
+        if (!params_.optimization.use_newton_optimizer) {
 			loss.backward();
-        else {
-            torch::autograd::variable_list params = {strategy_->get_model().get_means(), strategy_->get_model().get_rotation(), strategy_->get_model().get_scaling(), strategy_->get_model().get_opacity(), strategy_->get_model().get_shs()};
-            auto latest_autograd_gradients_ = torch::autograd::grad({loss}, {params}, {}, std::nullopt, true);
+            // Note: If newton optimizer is not used, gradients and hvp_result will be empty.
+            // The conjugate_gradient_solver call below is inside an if-block for NewtonStrategy,
+            // so this should be fine.
+        } else {
+            // Define parameters for gradient computation
+            params_list = {
+                strategy_->get_model().get_means(),
+                strategy_->get_model().get_rotation(),
+                strategy_->get_model().get_scaling(),
+                strategy_->get_model().get_opacity(),
+                strategy_->get_model().get_shs()
+            };
+
+            // 1. Compute first-order gradients: g = grad(loss, params_list, create_graph=True)
+            // The last argument `true` is allow_unused. The one before it is create_graph.
+            // Signature: grad(outputs, inputs, grad_outputs, retain_graph, create_graph, allow_unused)
+            gradients = torch::autograd::grad({loss}, params_list, /*grad_outputs=*/{}, /*retain_graph=*/std::nullopt, /*create_graph=*/true, /*allow_unused=*/true);
+
+            // Check if gradients were computed
+            if (!gradients.empty() && gradients[0].defined()) {
+                // 2. Define the vector `v` for HVP. Here, v = g (gradients).
+                // We need to detach `v` to prevent it from being part of the graph for the HVP computation itself,
+                // as HVP is (d/d_params of (d_loss/d_params * v_detached)).
+                std::vector<torch::Tensor> v_for_hvp;
+                v_for_hvp.reserve(gradients.size());
+                for (const auto& grad_tensor : gradients) {
+                    if (grad_tensor.defined()) {
+                        v_for_hvp.push_back(grad_tensor.detach());
+                    } else {
+                        // Handle cases where a parameter might not have a gradient (e.g. not used in loss)
+                        // This should align with how params_list was constructed and if allow_unused=true was effective.
+                        // Adding a zero tensor of the same shape, or erroring, or skipping.
+                        // For now, let's assume all relevant params get grads. If not, this needs robust handling.
+                        // This case might be hit if a param in params_list didn't affect the loss.
+                        // The original code used allow_unused=true, so this is possible.
+                        // We need a placeholder for v_for_hvp that matches params_list structure.
+                        // However, if a gradient is undefined, it cannot be used in dot product.
+                        // Let's ensure we only proceed if gradients are defined.
+                        // This check might be better placed after the grad call.
+                    }
+                }
+
+                if (gradients.size() == v_for_hvp.size()) { // Ensure all grads were defined and pushed
+                    // 3. Compute the dot product: grad_output_dot_v = sum(gradients[i] * v_for_hvp[i])
+                    // Ensure gradients[i] still requires grad for this operation. It should due to create_graph=true.
+                    torch::Tensor grad_output_dot_v = torch::zeros({}, loss.options()); // scalar, same device as loss
+
+                    for (size_t i = 0; i < gradients.size(); ++i) {
+                        if (gradients[i].defined() && v_for_hvp[i].defined()) { // Double check definition
+                             // Ensure compatible shapes for multiplication, then sum.
+                             // If gradients[i] and v_for_hvp[i] are not scalar, sum over all elements.
+                            grad_output_dot_v += torch::sum(gradients[i] * v_for_hvp[i]);
+                        }
+                    }
+
+                    // 4. Compute HVP: hvp_result = grad(grad_output_dot_v, params_list)
+                    // No need for create_graph=true here unless we need higher-order derivatives.
+                    // allow_unused=true is good practice here too.
+                    hvp_result = torch::autograd::grad({grad_output_dot_v}, params_list, /*grad_outputs=*/{}, /*retain_graph=*/std::nullopt, /*create_graph=*/false, /*allow_unused=*/true);
+                } else {
+                    std::cerr << "Warning: Mismatch in defined gradients and v_for_hvp size. Skipping HVP computation." << std::endl;
+                }
+            } else {
+                 std::cerr << "Warning: Gradients are empty or undefined after first grad call. Skipping HVP computation." << std::endl;
+            }
         }
 
         {
@@ -262,7 +328,9 @@ namespace gs {
             auto do_strategy = [&]() {
                 // If NewtonStrategy, provide it with necessary per-frame data
                 if (auto* newton_strat = dynamic_cast<NewtonStrategy*>(strategy_.get())) {
-                    newton_strat->conjugate_gradient_solver(params, latest_autograd_gradients_);
+                    // TODO: Modify conjugate_gradient_solver to accept hvp_result
+                    // The signature will be newton_strat->conjugate_gradient_solver(params_list, gradients, hvp_result);
+                    newton_strat->conjugate_gradient_solver(params_list, gradients, hvp_result); // Pass HVP
                     newton_strat->set_current_view_data(
                         cam,
                         gt_image, // gt_image is already on device if loaded by dataloader correctly

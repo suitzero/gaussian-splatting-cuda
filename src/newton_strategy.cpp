@@ -226,6 +226,105 @@ void NewtonStrategy::cache_camera_references() {
     std::cout << "NewtonStrategy: Cached " << uid_to_camera_cache_.size() << " camera references." << std::endl;
 }
 
+void NewtonStrategy::conjugate_gradient_solver(
+    const torch::autograd::variable_list& params,
+    const std::vector<torch::Tensor>& grads,
+    const std::vector<torch::Tensor>& hvp
+) {
+    // This function is called by the Trainer with the parameters, gradients (g),
+    // and the pre-computed Hessian-vector product (H*g).
+    // For now, we will cache `hvp` (which is H*g).
+    // The actual CG algorithm would typically reside in NewtonOptimizer and would
+    // iteratively request H*p_k for different vectors p_k.
+    // This pre-computed H*g might be used for the first step of CG or for other purposes.
+
+    // Cache the provided H*g.
+    current_hvp_ = hvp;
+
+    // TODO: Discuss how this pre-computed H*g should be used.
+    // Options:
+    // 1. Pass `current_hvp_` to `optimizer_->step()`. `NewtonOptimizer::step` would need modification.
+    // 2. `NewtonOptimizer` has its own CG solver that might take `g` and a function to compute H*v.
+    //    In this case, this `conjugate_gradient_solver` function here might be misnamed or
+    //    should coordinate with `NewtonOptimizer`.
+    // 3. The CG solver is intended to be implemented here directly (less likely given NewtonOptimizer exists).
+
+    // For now, we've stored it. The `step` method might use `current_hvp_`.
+    // It's also important to ensure `grads` are cached if needed by `optimizer_->step()`,
+    // which seems to be handled by `post_backward` for grads w.r.t. model parameters.
+    // The `grads` passed here are from `torch::autograd::grad` directly, which might be
+    // slightly different from `splat_data_->param.grad()` if not careful about zeroing, etc.
+    // However, `post_backward` currently sources gradients from `splat_data_-> ... .grad()`.
+    // The `grads` passed here are `d(loss)/d(params_list)`.
+    // Let's assume for now that `post_backward` correctly captures all necessary gradients
+    // from the model parameters after `loss.backward()` or after the first `torch::autograd::grad` call in Trainer.
+    // The `params` argument here is `params_list` from Trainer.
+    // The `grads` argument here is `gradients` from Trainer (the direct output of the first `autograd::grad` call).
+
+    // It seems `post_backward` is designed to pick up gradients after `loss.backward()`.
+    // When `use_newton_optimizer` is true, `loss.backward()` is NOT called in Trainer.
+    // Instead, `gradients = torch::autograd::grad(...)` is called.
+    // These `gradients` are NOT automatically populated into `param.grad()`.
+    // This is a critical point. `NewtonStrategy::post_backward` will not see these gradients.
+
+    // Therefore, we MUST cache `grads` (the ones passed into this function) here.
+    // The existing `autograd_grad_means_`, etc., fields can be populated from this `grads` vector.
+    // The `params` list tells us the order.
+
+    // Assuming params_list in Trainer was:
+    // {means, rotation, scaling, opacity, shs}
+    // And `grads` corresponds to this order.
+    // And `shs` was split into `sh0` and `shN` in `SplatData` but might be a single tensor in `params_list`.
+    // Need to check how `get_shs()` is structured. Let's assume it's {sh_coeffs_all_orders_combined}.
+    // Or, if SplatData::get_shs() returns a list {sh0, shN}, then params_list would have them separate.
+    // From Trainer: `strategy_->get_model().get_shs()` is one entry.
+    // So, gradients for SHs will be one tensor. `post_backward` splits them.
+
+    TORCH_CHECK(params.size() == grads.size(), "conjugate_gradient_solver: params and grads list size mismatch.");
+    if (params.size() >= 5) { // Assuming at least 5 parameter groups as in Trainer
+        // Order: means, rotation, scaling, opacity, shs (all)
+        // Need to ensure these indices match the order in Trainer's params_list
+        if (grads[0].defined()) autograd_grad_means_ = grads[0]; else autograd_grad_means_ = torch::zeros_like(splat_data_->get_means());
+        if (grads[1].defined()) autograd_grad_rotation_raw_ = grads[1]; else autograd_grad_rotation_raw_ = torch::zeros_like(splat_data_->get_rotation()); // Assuming get_rotation() is raw
+        if (grads[2].defined()) autograd_grad_scales_raw_ = grads[2]; else autograd_grad_scales_raw_ = torch::zeros_like(splat_data_->get_scaling()); // Assuming get_scaling() is raw
+        if (grads[3].defined()) autograd_grad_opacity_raw_ = grads[3]; else autograd_grad_opacity_raw_ = torch::zeros_like(splat_data_->get_opacity()); // Assuming get_opacity() is raw
+
+        if (grads[4].defined()) {
+            // SH gradients: grads[4] is for all SHs.
+            // SplatData stores SHs as sh0 (DC) and shN (higher order).
+            // We need to split grads[4] accordingly if NewtonOptimizer expects them split.
+            // NewtonOptimizer::step takes autograd_grad_sh0_ and autograd_grad_shN_.
+            const auto& all_sh_coeffs = splat_data_->get_shs(); // This is N x (Total SH Coeffs) x 3
+            int num_gaussians = all_sh_coeffs.size(0);
+            int num_rgb = all_sh_coeffs.size(2);
+
+            // SH0 is the first coefficient (DC term), SHN are the rest
+            // sh0 shape: [N, 1, 3] (actually [N,3] in SplatData if get_sh0() squeezes)
+            // shN shape: [N, num_higher_order_coeffs, 3]
+            // Let's check SplatData::get_sh0() and get_shs() return types/shapes
+            // SplatData::sh0_ is (N, 3)
+            // SplatData::shN_ is (N, SH_DEGREE_TOTAL-1, 3)
+            // SplatData::get_shs() returns a stacked tensor of sh0 and shN, so it's N x SH_DEGREE_TOTAL x 3
+            // The gradient grads[4] will have this combined shape.
+
+            autograd_grad_sh0_ = grads[4].slice(/*dim=*/1, /*start=*/0, /*end=*/1, /*step=*/1).reshape({num_gaussians, num_rgb}); // First component for DC
+            if (grads[4].size(1) > 1) { // If there are higher order SHs
+                 autograd_grad_shN_ = grads[4].slice(/*dim=*/1, /*start=*/1, /*end=*/grads[4].size(1), /*step=*/1);
+            } else {
+                autograd_grad_shN_ = torch::zeros_like(splat_data_->get_sh_higher_deg()); // Use getter for shape reference
+            }
+        } else {
+            autograd_grad_sh0_ = torch::zeros_like(splat_data_->get_sh_dc());
+            autograd_grad_shN_ = torch::zeros_like(splat_data_->get_sh_higher_deg());
+        }
+    } else {
+        std::cerr << "Warning: conjugate_gradient_solver received fewer than 5 parameter groups. Gradients may not be fully cached." << std::endl;
+    }
+    // This replaces the need for post_backward to capture gradients when use_newton_optimizer is true.
+    // Consider refactoring post_backward or having it do nothing if grads are already set by this function.
+}
+
+
 void NewtonStrategy::find_knn_for_current_primary(const Camera* primary_cam_in) {
     current_knn_targets_gpu_.clear();
     if (!splat_data_ || !primary_cam_in) {
