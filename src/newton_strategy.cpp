@@ -3,6 +3,7 @@
 #include "core/debug_utils.hpp"
 #include "core/parameters.hpp"
 #include "core/rasterizer.hpp"
+#include "kernels/fused_ssim.cuh"
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <exception>
 #include <iostream>
@@ -606,17 +607,107 @@ bool NewtonStrategy::is_refining(int iter) const {
             iter % _params->refine_every == 0);
 }
 
-void NewtonStrategy::loss_backward_and_hvp(const torch::Tensor& loss) {
-    // 1. Parameter Setup
-    // Ensure parameters require gradients if they don't already.
-    // The SplatData members should already be set up with requires_grad(true)
-    // during initialization if they are optimizable.
-    _splat_data.means().set_requires_grad(true);
-    _splat_data.rotation_raw().set_requires_grad(true);
-    _splat_data.scaling_raw().set_requires_grad(true);
-    _splat_data.opacity_raw().set_requires_grad(true);
-    _splat_data.shN().set_requires_grad(true);
-    _splat_data.sh0().set_requires_grad(true);
+std::vector<torch::Tensor> NewtonStrategy::conjugate_gradient() {
+    auto b = _current_grads;
+    int max_iter = 10;
+    float tol = 1e-5;
+    auto Hv_func = [&](const std::vector<torch::Tensor>& v) -> std::vector<torch::Tensor> {
+        float eps = 1e-5f;
+        auto grad_plus = compute_perturbed_grad(v,eps); // perturb_v = v (map)
+        auto grad_minus = compute_perturbed_grad(v,-eps);
+
+        std::vector<torch::Tensor> hvp;
+        for (int i = 0; i < v.size(); ++i) {
+            hvp[i] = (grad_plus[i] - grad_minus[i]) / (2.0f * eps);
+        }
+        return hvp;
+    };
+    std::vector<torch::Tensor> x; // Initialize x=0
+    for (const auto& bi : b) {
+        x.push_back(torch::zeros_like(bi));
+    }
+
+    auto r = b; // Initial residual r = b - A*x = b since x=0
+    auto p = r;
+    auto rs_old = torch::tensor(0.0, b[0].options());
+    for (const auto& ri : r) {
+        if (ri.defined()) {
+            rs_old += torch::sum(ri * ri);
+        }
+    }
+
+    for (int i = 0; i < max_iter; ++i) {
+        auto Ap = Hv_func(p);
+        auto pAp = torch::tensor(0.0, b[0].options());
+        for (size_t j = 0; j < p.size(); ++j) {
+            if (p[j].defined() && Ap[j].defined()) {
+                pAp += torch::sum(p[j] * Ap[j]);
+            }
+        }
+
+        auto alpha = rs_old / pAp;
+
+        for (size_t j = 0; j < x.size(); ++j) {
+            if (x[j].defined()) {
+                x[j] += alpha * p[j];
+                r[j] -= alpha * Ap[j];
+            }
+        }
+
+        auto rs_new = torch::tensor(0.0, b[0].options());
+        for (const auto& ri : r) {
+            if (ri.defined()) {
+                rs_new += torch::sum(ri * ri);
+            }
+        }
+
+        if (rs_new.sqrt().item<double>() < tol) {
+            break;
+        }
+
+        auto beta = rs_new / rs_old;
+        for (size_t j = 0; j < p.size(); ++j) {
+            if (p[j].defined()) {
+                p[j] = r[j] + beta * p[j];
+            }
+        }
+
+        rs_old = rs_new;
+    }
+
+    return x;
+}
+
+float NewtonStrategy::compute_loss(const Camera& viewpoint_camera,const gs::RenderOutput& render_output, const torch::Tensor& gt_image) {
+    // Ensure images have same dimensions
+    _cam = viewpoint_camera;
+    torch::Tensor rendered = render_output.image;
+    torch::Tensor gt = gt_image;
+    _gt_image = gt_image;
+
+    // Ensure both tensors are 4D (batch, height, width, channels)
+    rendered = rendered.dim() == 3 ? rendered.unsqueeze(0) : rendered;
+    gt = gt.dim() == 3 ? gt.unsqueeze(0) : gt;
+
+    TORCH_CHECK(rendered.sizes() == gt.sizes(), "ERROR: size mismatch – rendered ", rendered.sizes(), " vs. ground truth ", gt.sizes());
+
+    // Base loss: L1 + SSIM
+    torch::Tensor loss;
+    auto ssim_loss = 1.f - fused_ssim(rendered, gt, "valid", /*train=*/true);
+	auto l2_loss = torch::mse_loss(rendered, gt);
+	loss = l2_loss + _params->lambda_dssim * ssim_loss;
+
+    if (_params->opacity_reg > 0.0f) {
+        auto opacity_l1 = torch::abs(_splat_data.get_opacity()).mean();
+        loss += _params->opacity_reg * opacity_l1;
+    }
+
+    if (_params->scale_reg > 0.0f) {
+        auto scale_l1 = torch::abs(_splat_data.get_scaling()).mean();
+        loss += _params->scale_reg * scale_l1;
+    }
+
+    _current_loss = loss;
 
     _current_params_list = {
         _splat_data.means(),
@@ -651,46 +742,6 @@ void NewtonStrategy::loss_backward_and_hvp(const torch::Tensor& loss) {
         /*create_graph=*/true,
         /*allow_unused=*/true);
 
-    // 3. HVP Calculation
-    // Clear previous HVP result
-    _current_hvp_result.clear();
-    if (!_current_grads.empty() && std::all_of(_current_grads.begin(), _current_grads.end(), [](const torch::Tensor& t){ return t.defined(); })) {
-        std::vector<torch::Tensor> v_for_hvp;
-        v_for_hvp.reserve(_current_grads.size());
-        for (const auto& grad_tensor : _current_grads) {
-            // This check is somewhat redundant due to all_of above, but good for safety
-            if (grad_tensor.defined()) {
-                v_for_hvp.push_back(grad_tensor.detach());
-            } else {
-                // This block should ideally not be reached if all_of passed.
-                // If it were, we'd need robust handling e.g. pushing a zero tensor of correct shape or flagging error.
-                std::cerr << "Error: Undefined gradient encountered unexpectedly in HVP prep." << std::endl;
-            }
-        }
-
-        if (_current_grads.size() != v_for_hvp.size()) {
-             std::cerr << "Warning: Mismatch in defined gradients and v_for_hvp size. Skipping HVP computation." << std::endl;
-             _current_hvp_result.assign(_current_params_list.size(), torch::Tensor()); // Fill with undefined tensors
-        } else {
-            torch::Tensor grad_output_dot_v = torch::zeros({}, loss.options());
-            for (size_t i = 0; i < _current_grads.size(); ++i) {
-                if (_current_grads[i].defined() && v_for_hvp[i].defined()) {
-                    grad_output_dot_v += torch::sum(_current_grads[i] * v_for_hvp[i]);
-                }
-            }
-
-            _current_hvp_result = torch::autograd::grad(
-                {grad_output_dot_v},
-                _current_params_list,
-                /*grad_outputs=*/{},
-                /*retain_graph=*/std::nullopt,
-                /*create_graph=*/false,
-                /*allow_unused=*/true);
-        }
-    } else {
-        std::cerr << "Warning: Gradients vector is empty or contains undefined tensors after first grad call. Skipping HVP computation." << std::endl;
-        _current_hvp_result.assign(_current_params_list.size(), torch::Tensor());
-    }
 
     // 4. Gradient Assignment & Debug Print
     for (size_t i = 0; i < _current_grads.size(); ++i) {
@@ -699,6 +750,11 @@ void NewtonStrategy::loss_backward_and_hvp(const torch::Tensor& loss) {
                   << ": defined=" << grad.defined();
         if (grad.defined()) {
             std::cout << ", sizes=" << grad.sizes();
+            if (_current_grads[i].grad_fn()) {
+                std::cout << "Grad " << i << " has grad_fn: " << _current_grads[i].grad_fn()->name() << std::endl;
+            } else {
+                std::cout << "Grad " << i << " does NOT have grad_fn." << std::endl;
+            }
         }
         std::cout << std::endl;
     }
@@ -711,37 +767,48 @@ void NewtonStrategy::loss_backward_and_hvp(const torch::Tensor& loss) {
             if (!_current_grads[i].defined()) std::cout << "Grad " << i << " not defined for grad assignment." << std::endl;
         }
     }
-    // No return value (void method)
 }
 
-std::vector<torch::Tensor> NewtonStrategy::conjugate_gradient() {
-    std::vector<torch::Tensor> delta_params;
-    if (!_current_grads.empty() && _params) {
-        // Use means_lr as a stand-in for a specific Newton learning rate for now
-        // Ensure _params is not null before accessing
-        float learning_rate = static_cast<float>(_params->means_lr);
-
-        delta_params.reserve(_current_grads.size());
-        for (const auto& grad_tensor : _current_grads) {
-            if (grad_tensor.defined()) {
-                delta_params.push_back(-learning_rate * grad_tensor);
-            } else {
-                // Push an undefined tensor if grad was undefined, to maintain size consistency
-                delta_params.push_back(torch::Tensor());
-                std::cerr << "Warning: Undefined gradient encountered in conjugate_gradient placeholder." << std::endl;
-            }
-        }
-    } else {
-        if (_current_grads.empty()) {
-            std::cerr << "Error: _current_grads is empty in conjugate_gradient. Call loss_backward_and_hvp first." << std::endl;
-        }
-        if (!_params) {
-            std::cerr << "Error: _params is null in conjugate_gradient. Initialize strategy first." << std::endl;
-        }
-        // Return an empty vector or a vector of undefined Tensors matching _current_params_list size
-        if(!_current_params_list.empty()){
-            delta_params.assign(_current_params_list.size(), torch::Tensor());
-        }
+std::vector<torch::Tensor> NewtonStrategy::compute_perturbed_grad(const std::vector<torch::Tensor>& perturb, float eps) {
+    std::vector<torch::Tensor> original_data;
+    for (const auto& param : _current_params_list) {
+        original_data.push_back(param.clone());
     }
-    return delta_params;
+
+    // Apply scaled perturbation: p += eps * v
+    for (int i = 0; i < perturb.size();++i) {
+        auto& param = _current_params_list[i];
+        param.add_(v * eps);
+    }
+
+    /*
+    for (int i = 0; i < perturb.size();++i) {
+        auto& param = _current_params_list[i];
+        if (param.grad().defined()) {
+            param.grad().zero_();
+        }
+    }*/
+    
+	auto background_ = torch::tensor({0.f, 0.f, 0.f}, torch::TensorOptions().dtype(torch::kFloat32)).to(torch::kCUDA);
+    auto render = gs::rasterize(_cam,_splat_data,background_,1.0f,false,false,_params->render_mode); // Pass other fixed args like viewmat, K, tile setup
+
+    auto loss = compute_loss(_cam,render, _gt_image); // Assume gt_image is current view's GT; include LPIPS if --eval
+
+    // Backward
+    loss.backward();
+
+    // Clone perturbed gradients
+    std::map<std::string, torch::Tensor> perturbed_grads;
+    for (const auto& name : param_names) {
+        auto& param = get_param_by_name(name);
+        perturbed_grads[name] = param.grad().clone();
+    }
+
+    // Restore original data: p -= eps * v (by copying back)
+    for (const auto& name : param_names) {
+        auto& param = get_param_by_name(name);
+        param.copy_(original_data[name]);
+    }
+
+    return perturbed_grads;
 }

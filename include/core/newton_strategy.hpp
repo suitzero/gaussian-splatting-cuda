@@ -23,18 +23,11 @@ public:
     SplatData& get_model() override { return _splat_data; }
     const SplatData& get_model() const override { return _splat_data; }
 
-    // Method to compute loss.backward(), gradients, and HVP
-    // Results are stored in member variables _current_grads, _current_hvp_result, _current_params_list
-    void loss_backward_and_hvp(const torch::Tensor& loss);
-
-    // Placeholder for Conjugate Gradient solver
+    float compute_loss(const Camera& viewpoint_camera,const gs::RenderOutput& render_output,const torch::Tensor& gt_image);
+    std::vector<torch::Tensor> compute_perturbed_grad(const std::vector<torch::Tensor>& p,float eps);
     std::vector<torch::Tensor> conjugate_gradient();
 
 private:
-    // Member variables for storing results from loss_backward_and_hvp
-    std::vector<torch::Tensor> _current_grads;
-    std::vector<torch::Tensor> _current_hvp_result;
-    torch::autograd::variable_list _current_params_list;
 
     // Simple ExponentialLR implementation since C++ API is different
     class ExponentialLR {
@@ -62,11 +55,19 @@ private:
                                        const torch::Tensor& dead_indices,
                                        int param_position);
 
+    Camera _cam;
     // Member variables
     std::unique_ptr<torch::optim::Optimizer> _optimizer;
     std::unique_ptr<ExponentialLR> _scheduler;
     SplatData _splat_data;
     std::unique_ptr<const gs::param::OptimizationParameters> _params;
+
+    // Member variables for storing results from loss_backward_and_hvp
+    torch::Tensor _current_loss;
+    torch::Tensor _gt_image;
+    std::vector<torch::Tensor> _current_grads;
+    std::vector<torch::Tensor> _current_hvp_result;
+    torch::autograd::variable_list _current_params_list;
 
     // MCMC specific parameters
     const float _noise_lr = 5e5;

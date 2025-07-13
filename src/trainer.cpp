@@ -48,14 +48,10 @@ namespace gs {
         // Base loss: L1 + SSIM
         torch::Tensor loss;
 		auto ssim_loss = 1.f - fused_ssim(rendered, gt, "valid", /*train=*/true);
-        if (opt_params.use_newton_optimizer) {
-            auto l2_loss = torch::mse_loss(rendered, gt);
-			loss = l2_loss + opt_params.lambda_dssim * ssim_loss;
-        } else {
-			auto l1_loss = torch::l1_loss(rendered, gt);
-            loss = (1.f - opt_params.lambda_dssim) * l1_loss +
-                             opt_params.lambda_dssim * ssim_loss;
-        }
+		auto l1_loss = torch::l1_loss(rendered, gt);
+		loss = (1.f - opt_params.lambda_dssim) * l1_loss +
+						 opt_params.lambda_dssim * ssim_loss;
+
         // Regularization terms
         if (opt_params.opacity_reg > 0.0f) {
             auto opacity_l1 = torch::abs(splatData.get_opacity()).mean();
@@ -222,33 +218,22 @@ namespace gs {
         if (bilateral_grid_ && params_.optimization.use_bilateral_grid) {
             r_output.image = bilateral_grid_->apply(r_output.image, cam->uid());
         }
-        // Compute loss using the factored-out function
-        torch::Tensor loss = compute_loss(r_output,
-                                          gt_image,
-                                          strategy_->get_model(),
-                                          params_.optimization);
-
-        current_loss_ = loss.item<float>();
-
-        // Declare variables for gradients, HVP, and parameters from the strategy method
-        torch::autograd::variable_list trainer_params;
-        std::vector<torch::Tensor> trainer_grads;
-        // trainer_grads, trainer_hvp_result, trainer_params are no longer populated here
-        // as loss_backward_and_hvp is void and stores results internally in NewtonStrategy.
 
         if (!params_.optimization.use_newton_optimizer) {
+			// Compute loss using the factored-out function
+			torch::Tensor loss = compute_loss(r_output,
+											  gt_image,
+											  strategy_->get_model(),
+											  params_.optimization);
+
+			current_loss_ = loss.item<float>();
 			loss.backward();
         } else {
-            // Ensure strategy_ is of NewtonStrategy type or that IStrategy has a virtual method
-            // if we want to avoid dynamic_cast or static_cast here.
-            // For now, assuming strategy_ is known to be NewtonStrategy* when use_newton_optimizer is true.
-            // The dynamic_cast in do_strategy was removed, so direct call or static_cast is needed.
             if (auto* newton_strat = dynamic_cast<NewtonStrategy*>(strategy_.get())) {
-                 newton_strat->loss_backward_and_hvp(loss);
+                 newton_strat->compute_loss(cam,r_output,gt_image);
             } else {
-                // Fallback or error if strategy_ is not NewtonStrategy but use_newton_optimizer is true
                 std::cerr << "Error: use_newton_optimizer is true, but strategy is not NewtonStrategy." << std::endl;
-                loss.backward(); // Fallback to standard backward
+                exit(-1);
             }
         }
 
@@ -291,7 +276,7 @@ namespace gs {
             }
         }
 
-        progress_->update(iter, loss.item<float>(),
+        progress_->update(iter, current_loss_,
                           static_cast<int>(strategy_->get_model().size()),
                           strategy_->is_refining(iter));
 
@@ -301,7 +286,7 @@ namespace gs {
                 std::lock_guard<std::mutex> lock(viewer_->info_->mtx);
                 info->updateProgress(iter, params_.optimization.iterations);
                 info->updateNumSplats(static_cast<size_t>(strategy_->get_model().size()));
-                info->updateLoss(loss.item<float>());
+                info->updateLoss(current_loss_);
             }
 
             if (viewer_->notifier_) {
