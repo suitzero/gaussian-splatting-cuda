@@ -230,7 +230,7 @@ namespace gs {
 			loss.backward();
         } else {
             if (auto* newton_strat = dynamic_cast<NewtonStrategy*>(strategy_.get())) {
-                 newton_strat->compute_loss(cam,r_output,gt_image);
+                 newton_strat->compute_loss(*cam,r_output,gt_image);
             } else {
                 std::cerr << "Error: use_newton_optimizer is true, but strategy is not NewtonStrategy." << std::endl;
                 exit(-1);

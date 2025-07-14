@@ -618,7 +618,7 @@ std::vector<torch::Tensor> NewtonStrategy::conjugate_gradient() {
 
         std::vector<torch::Tensor> hvp;
         for (int i = 0; i < v.size(); ++i) {
-            hvp[i] = (grad_plus[i] - grad_minus[i]) / (2.0f * eps);
+            hvp.push_back((grad_plus[i] - grad_minus[i]) / (2.0f * eps));
         }
         return hvp;
     };
@@ -798,16 +798,16 @@ std::vector<torch::Tensor> NewtonStrategy::compute_perturbed_grad(const std::vec
     loss.backward();
 
     // Clone perturbed gradients
-    std::map<std::string, torch::Tensor> perturbed_grads;
-    for (const auto& name : param_names) {
-        auto& param = get_param_by_name(name);
-        perturbed_grads[name] = param.grad().clone();
+    std::vector<torch::Tensor> perturbed_grads;
+    for (int i = 0; i < perturb.size(); ++i) {
+        auto& param = _current_params_list[i];
+        perturbed_grads.push_back(param.grad().clone());
     }
 
     // Restore original data: p -= eps * v (by copying back)
-    for (const auto& name : param_names) {
-        auto& param = get_param_by_name(name);
-        param.copy_(original_data[name]);
+    for (int i = 0; i < perturb.size(); ++i) {
+        auto& param = _current_params_list[i];
+        param.copy_(original_data[i]);
     }
 
     return perturbed_grads;
