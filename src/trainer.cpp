@@ -110,9 +110,13 @@ namespace gs {
         background_ = torch::tensor({0.f, 0.f, 0.f}, torch::TensorOptions().dtype(torch::kFloat32));
         background_ = background_.to(torch::kCUDA);
 
+        int update_frequency = 100;
+        if (params_.optimization.use_newton_optimizer) {
+            update_frequency = 1;
+        }
         progress_ = std::make_unique<TrainingProgress>(
             params.optimization.iterations,
-            /*bar_width=*/100);
+            /*bar_width=*/update_frequency);
 
         // Initialize the evaluator - it handles all metrics internally
         evaluator_ = std::make_unique<metrics::MetricsEvaluator>(params);
@@ -230,7 +234,8 @@ namespace gs {
 			loss.backward();
         } else {
             if (auto* newton_strat = dynamic_cast<NewtonStrategy*>(strategy_.get())) {
-                 newton_strat->compute_loss(*cam,r_output,gt_image);
+                 auto loss = newton_strat->compute_loss(cam,r_output,gt_image);
+                 current_loss_ = loss.item<float>();
             } else {
                 std::cerr << "Error: use_newton_optimizer is true, but strategy is not NewtonStrategy." << std::endl;
                 exit(-1);
@@ -238,7 +243,7 @@ namespace gs {
         }
 
         {
-            torch::NoGradGuard no_grad;
+            //torch::NoGradGuard no_grad;
 
             // Clean evaluation - let the evaluator handle everything
             if (evaluator_->is_enabled() && evaluator_->should_evaluate(iter)) {
