@@ -112,7 +112,7 @@ namespace gs {
 
         int update_frequency = 100;
         if (params_.optimization.use_newton_optimizer) {
-            update_frequency = 1;
+            update_frequency = 2;
         }
         progress_ = std::make_unique<TrainingProgress>(
             params.optimization.iterations,
