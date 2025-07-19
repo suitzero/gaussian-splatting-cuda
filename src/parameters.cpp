@@ -121,7 +121,8 @@ namespace gs {
                     {"tv_loss_weight", defaults.tv_loss_weight, "Weight for total variation loss"},
                     {"steps_scaler", defaults.steps_scaler, "Scales the training steps and values"},
                     {"sh_degree_interval", defaults.sh_degree_interval, "Interval for increasing SH degree"},
-                    {"selective_adam", defaults.selective_adam, "Selective Adam optimizer flag"}};
+                    {"selective_adam", defaults.selective_adam, "Selective Adam optimizer flag"},
+                    {"pico_strategy", defaults.pico_strategy, "Pico strategy flag"}};
 
                 // Check all expected parameters
                 for (const auto& param : expected_params) {
@@ -326,6 +327,9 @@ namespace gs {
             if (json.contains("selective_adam")) {
                 params.selective_adam = json["selective_adam"];
             }
+            if (json.contains("pico_strategy")) {
+                params.pico_strategy = json["pico_strategy"];
+            }
             return params;
         }
 
@@ -398,6 +402,7 @@ namespace gs {
             opt_json["steps_scaler"] = params.optimization.steps_scaler;
             opt_json["sh_degree_interval"] = params.optimization.sh_degree_interval;
             opt_json["selective_adam"] = params.optimization.selective_adam;
+            opt_json["pico_strategy"] = params.optimization.pico_strategy;
 
             json["optimization"] = opt_json;
 

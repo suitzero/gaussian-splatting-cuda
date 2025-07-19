@@ -69,6 +69,7 @@ add_subdirectory(gsplat)
 
 set(HOST_SOURCES
         src/mcmc.cpp
+        src/pico_strategy.cpp
         src/camera.cpp
         src/image_io.cpp
         src/colmap_reader.cpp

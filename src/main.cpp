@@ -1,6 +1,7 @@
 #include "core/argument_parser.hpp"
 #include "core/dataset.hpp"
 #include "core/mcmc.hpp"
+#include "core/pico_strategy.hpp"
 #include "core/parameters.hpp"
 #include "core/trainer.hpp"
 #include "visualizer/detail.hpp"
@@ -33,7 +34,12 @@ int main(int argc, char* argv[]) {
         //----------------------------------------------------------------------
         // 5. Create strategy
         //----------------------------------------------------------------------
-        auto strategy = std::make_unique<MCMC>(std::move(splat_data));
+        std::unique_ptr<IStrategy> strategy;
+        if (params.optimization.pico_strategy) {
+            strategy = std::make_unique<PicoStrategy>(std::move(splat_data));
+        } else {
+            strategy = std::make_unique<MCMC>(std::move(splat_data));
+        }
 
         //----------------------------------------------------------------------
         // 6. Create trainer
