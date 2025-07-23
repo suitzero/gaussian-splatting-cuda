@@ -190,9 +190,10 @@ namespace gs {
         if (stop_requested_) {
             return false;
         }
-
+        float scale = iter < 0? 1.0 : 0.1*std::min(10, 1+iter / 700);
+        //if (iter % 1000 == 0) std::cout << "scale:" << scale << std::endl;
         // Use the render mode from parameters
-        auto render_fn = [this, &cam, render_mode]() {
+        auto render_fn = [this, &cam, render_mode,scale]() {
             return gs::rasterize(
                 *cam,
                 strategy_->get_model(),
@@ -200,7 +201,8 @@ namespace gs {
                 1.0f,
                 false,
                 false,
-                render_mode);
+                render_mode,
+                1.0);
         };
 
         RenderOutput r_output;
@@ -312,12 +314,25 @@ namespace gs {
         bool should_continue = true;
 
         for (int epoch = 0; epoch < epochs_needed && should_continue; ++epoch) {
+			float scale = 0.1*std::min(10, 1+epoch);
+            //scale = 0.5;
+            //std::cout << "epoch:" << scale<< std::endl;
             auto train_dataloader = create_dataloader_from_dataset(train_dataset_, num_workers);
 
             for (auto& batch : *train_dataloader) {
                 auto camera_with_image = batch[0].data;
                 Camera* cam = camera_with_image.camera;
+                cam->temp_update(scale);
                 torch::Tensor gt_image = std::move(camera_with_image.image);
+
+				gt_image = torch::nn::functional::interpolate(
+						  gt_image.unsqueeze(0), // add batch dimension [1, C, H, W]
+						  torch::nn::functional::InterpolateFuncOptions()
+                                   .size(std::vector<int64_t>({cam->image_height(), cam->image_width()}))
+							  .mode(torch::kBilinear)
+							  .align_corners(false))
+						  .squeeze(0); // remove batch dimension
+                //std::cout << gt_image.sizes() << std::endl;
 
                 should_continue = train_step(iter, cam, gt_image, render_mode);
 

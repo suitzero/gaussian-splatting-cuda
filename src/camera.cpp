@@ -37,11 +37,11 @@ Camera::Camera(const torch::Tensor& R,
 torch::Tensor Camera::K() const {
     const float tanfovx = std::tan(_FoVx * 0.5f);
     const float tanfovy = std::tan(_FoVy * 0.5f);
-    const float focal_length_x = _image_width / (2.f * tanfovx);
-    const float focal_length_y = _image_height / (2.f * tanfovy);
+    const float focal_length_x = _image_width*_temp_scale / (2.f * tanfovx);
+    const float focal_length_y = _image_height*_temp_scale / (2.f * tanfovy);
 
-    const float cx = _image_width / 2.0f;
-    const float cy = _image_height / 2.0f;
+    const float cx = _image_width*_temp_scale / 2.0f;
+    const float cy = _image_height*_temp_scale / 2.0f;
 
     const auto K = torch::zeros({1, 3, 3}, _world_view_transform.options());
     K[0][0][0] = focal_length_x;

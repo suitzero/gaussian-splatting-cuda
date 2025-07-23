@@ -37,14 +37,18 @@ public:
 
     torch::Tensor K() const;
 
-    int image_height() const noexcept { return _image_height; }
-    int image_width() const noexcept { return _image_width; }
+    void temp_update(float scale) {
+        _temp_scale = scale;
+    }
+    int image_height() const noexcept { return _image_height * _temp_scale; }
+    int image_width() const noexcept { return _image_width * _temp_scale; }
     float FoVx() const noexcept { return _FoVx; }
     float FoVy() const noexcept { return _FoVy; }
     const std::string& image_name() const noexcept { return _image_name; }
     int uid() const noexcept { return _uid; }
 
 private:
+    float _temp_scale = 1.0;
     // IDs
     int _uid = -1;
     float _FoVx = 0.f;
